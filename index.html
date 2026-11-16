@@ -13,7 +13,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="icon" type="image/svg+xml" href="./icon.svg">
-<link rel="apple-touch-icon" href="./icon.svg">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <style>
 /* Раскладка: одна колонка на телефоне, нижняя навигация; от 960px навигация уходит в боковую рейку, карточки в две колонки. */
 :root {
@@ -998,3 +998,1522 @@ details.rules summary { font-size: 14px; }
     Object.keys(state.fuel).forEach((k) => state.fuel[k].forEach((e) => { fuelKop += kop(e.amount); fuelCount++; }));
     return {
       ok: true, state, count, skipped: info.skipped, total: rub(totalKop),
+      hasFuel: obj.fuel !== undefined, fuelCount, fuelTotal: rub(fuelKop), fuelSkipped: info.fuelSkipped
+    };
+  }
+
+  /* ---------- достижения ---------- */
+  const ACH = [
+    { id: 'first', title: 'Первый заработанный день', hint: 'Запишите день с заработком', icon: 'star' },
+    { id: 's7', title: '7 дней подряд', hint: 'Семь дней подряд с выполненной целью', icon: 'flame' },
+    { id: 's14', title: '14 дней подряд', hint: 'Две недели без пропусков цели', icon: 'zap' },
+    { id: 'k20', title: 'Первый рубеж 20 000 ₽', hint: 'Накопите 20 000 ₽', icon: 'flag' },
+    { id: 'half', title: '50% цели', hint: 'Дойдите до половины пути', icon: 'target' },
+    { id: 'finish', title: 'Финиш — 92 000 ₽', hint: 'Соберите всю сумму', icon: 'trophy' }
+  ];
+
+  function achievements(c) {
+    const fact = c.factKop;
+    const items = {
+      first: { have: c.workingCount > 0 ? 1 : 0, need: 1, unit: 'one' },
+      s7: { have: Math.min(c.streak.best, 7), need: 7, unit: 'days' },
+      s14: { have: Math.min(c.streak.best, 14), need: 14, unit: 'days' },
+      k20: { have: Math.min(fact, 2000000) / 100, need: 20000, unit: 'rub' },
+      half: { have: Math.min(fact, TOTAL_KOP / 2) / 100, need: TOTAL_KOP / 200, unit: 'rub' },
+      finish: { have: Math.min(fact, TOTAL_KOP) / 100, need: TOTAL_KOP / 100, unit: 'rub' }
+    };
+    return ACH.map((a) => {
+      const p = items[a.id];
+      return Object.assign({}, a, p, { unlocked: p.have >= p.need, ratio: Math.min(1, p.have / p.need) });
+    });
+  }
+
+  /* ---------- серия дней подряд ---------- */
+  function streaks(days, today) {
+    let best = 0, run = 0;
+    days.forEach((d) => {
+      if (d.status === 'done') { run++; if (run > best) best = run; } else run = 0;
+    });
+    let i = -1;
+    for (let j = 0; j < days.length; j++) if (days[j].date <= today) i = j;
+    let cur = 0;
+    if (i >= 0) {
+      if (days[i].date === today && !days[i].filled) i--; // сегодняшний день ещё не закончился
+      while (i >= 0 && days[i].status === 'done') { cur++; i--; }
+    }
+    return { current: cur, best };
+  }
+
+  /* ---------- группировка: недели и периоды ---------- */
+  function summarize(list, today) {
+    let fact = 0, filled = 0, done = 0, acc = 0, fuel = 0;
+    list.forEach((d) => {
+      fuel += d.fuelKop;
+      if (d.filled) { fact += d.kop; filled++; }
+      if (d.status === 'done') done++;
+      if (d.accountable) acc++;
+    });
+    const first = list[0].date, last = list[list.length - 1].date;
+    const planKop = GOAL_KOP * list.length;
+    const planToDateKop = GOAL_KOP * acc;
+    return {
+      start: first,
+      end: last,
+      length: list.length,
+      planKop,
+      factKop: fact,
+      fuelKop: fuel,
+      netKop: fact - fuel,
+      planToDateKop,
+      diffKop: fact - planToDateKop,
+      pct: planKop ? (fact * 100) / planKop : 0,
+      doneCount: done,
+      filledCount: filled,
+      accountableCount: acc,
+      avgKop: filled ? fact / filled : null,
+      state: last < today ? 'past' : first > today ? 'future' : 'current',
+      strip: list.map((d) => ({ date: d.date, status: d.status, isToday: d.isToday, isFuture: d.isFuture }))
+    };
+  }
+
+  /* ---------- главный расчёт ---------- */
+  function compute(state, today) {
+    const phase = today < CFG.start ? 'before' : today > CFG.end ? 'after' : 'active';
+    const fuelMap = state.fuel || {};
+    const days = DAYS.map((date, i) => {
+      const e = state.days[date] || null;
+      const k = e ? kop(e.amount) : null;
+      const filled = k !== null;
+      const fl = fuelOf(fuelMap[date]);
+      return {
+        fuelKop: fl.kop, fuelCount: fl.n, fuelLitersRaw: fl.liters, fuelKopL: fl.kopL,
+        date, idx: i, entry: e, amount: filled ? e.amount : null, kop: k, filled,
+        status: statusOf(k, GOAL_KOP),
+        isToday: date === today,
+        isFuture: date > today,
+        isPast: date < today,
+        accountable: filled || date < today,
+        deltaKop: filled ? k - GOAL_KOP : null,
+        week: Math.floor(diffDays(FIRST_MONDAY, date) / CFG.weekLen),
+        period: Math.floor(i / CFG.periodLen)
+      };
+    });
+
+    let factKop = 0, filledCount = 0, doneCount = 0, partialCount = 0, zeroCount = 0;
+    let workingCount = 0, workingKop = 0, overKop = 0, accountableCount = 0;
+    let best = null, worst = null;
+    days.forEach((d) => {
+      if (d.accountable) accountableCount++;
+      if (!d.filled) return;
+      factKop += d.kop; filledCount++;
+      if (d.status === 'done') doneCount++;
+      else if (d.status === 'partial') partialCount++;
+      else zeroCount++;
+      if (d.kop > 0) {
+        workingCount++; workingKop += d.kop;
+        if (!best || d.kop > best.kop) best = d;
+        if (!worst || d.kop < worst.kop) worst = d;
+      }
+      if (d.kop > GOAL_KOP) overKop += d.kop - GOAL_KOP;
+    });
+
+    const missing = days.filter((d) => !d.filled && d.date < today);
+    const planToDateKop = GOAL_KOP * accountableCount;
+    const reserveKop = factKop - planToDateKop;
+    const remainingKop = Math.max(0, TOTAL_KOP - factKop);
+    const remainingDays = days.filter((d) => !d.filled && d.date >= today).length;
+    const avgFilledKop = filledCount ? factKop / filledCount : null;
+    const todayDay = days.find((d) => d.isToday) || null;
+
+    // сколько нужно заработать сегодня, чтобы остаться в графике (сегодня в план пока не входит)
+    const needTodayKop = todayDay && !todayDay.filled ? GOAL_KOP - reserveKop : null;
+    const requiredPaceRub = remainingDays > 0 ? Math.ceil(remainingKop / remainingDays / 100) : null;
+
+    const projectedKop = avgFilledKop === null ? null : Math.round(factKop + avgFilledKop * remainingDays);
+
+    const streak = streaks(days, today);
+
+    // заправки: считаются отдельно и не входят ни в план, ни в запас, ни в серию
+    let fuelKop = 0, fuelCount = 0, fuelDays = 0, fuelLitersRaw = 0, fuelKopL = 0;
+    days.forEach((d) => {
+      fuelKop += d.fuelKop; fuelCount += d.fuelCount; fuelLitersRaw += d.fuelLitersRaw; fuelKopL += d.fuelKopL;
+      if (d.fuelCount) fuelDays++;
+    });
+    const fuelRecent = [];
+    Object.keys(fuelMap).forEach((date) => (fuelMap[date] || []).forEach((e) => {
+      fuelRecent.push({ date, id: e.id, amount: e.amount, liters: e.liters, note: e.note, ts: e.ts || '' });
+    }));
+    fuelRecent.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0)));
+
+    // накопительные ряды для графиков
+    let anchor = -1; // последний учитываемый день
+    days.forEach((d) => { if (d.accountable) anchor = d.idx; });
+    const series = { cumFact: [], cumPlan: [], reserve: [], forecast: [] };
+    let cum = 0, accum = 0;
+    days.forEach((d, i) => {
+      if (d.filled) cum += d.kop;
+      if (d.accountable) accum++;
+      series.cumPlan.push(GOAL_KOP * (i + 1));
+      series.cumFact.push(i <= anchor ? cum : null);
+      series.reserve.push(i <= anchor ? cum - GOAL_KOP * accum : null);
+    });
+    days.forEach((d, i) => {
+      if (avgFilledKop === null || anchor < 0 || i < anchor) { series.forecast.push(null); return; }
+      series.forecast.push(Math.round(series.cumFact[anchor] + avgFilledKop * (i - anchor)));
+    });
+
+    const groupBy = (key) => {
+      const map = new Map();
+      days.forEach((d) => {
+        if (!map.has(d[key])) map.set(d[key], []);
+        map.get(d[key]).push(d);
+      });
+      return Array.from(map.keys()).sort((a, b) => a - b).map((k, n) => Object.assign({ index: n }, summarize(map.get(k), today)));
+    };
+
+    const c = {
+      today, phase, days,
+      goalKop: GOAL_KOP, totalKop: TOTAL_KOP, dayCount: days.length,
+      factKop, filledCount, doneCount, partialCount, zeroCount, workingCount, overKop,
+      accountableCount, planToDateKop, reserveKop,
+      progressPct: (factKop * 100) / TOTAL_KOP,
+      planPct: planToDateKop > 0 ? (factKop * 100) / planToDateKop : null,
+      remainingKop, remainingDays, requiredPaceRub, needTodayKop,
+      avgFilledKop, avgWorkingKop: workingCount ? workingKop / workingCount : null,
+      projectedKop, projectedDeltaKop: projectedKop === null ? null : projectedKop - TOTAL_KOP,
+      missing, missingCount: missing.length,
+      todayDay, streak, best, worst,
+      fuelKop, fuelCount, fuelDays,
+      fuelLiters: Math.round(fuelLitersRaw * 100) / 100,
+      fuelPriceRub: fuelLitersRaw > 0 ? fuelKopL / 100 / fuelLitersRaw : null,
+      avgRefuelKop: fuelCount ? fuelKop / fuelCount : null,
+      netKop: factKop - fuelKop,
+      fuelPct: factKop > 0 ? (fuelKop * 100) / factKop : null,
+      fuelRecent: fuelRecent.slice(0, 4),
+      weeks: groupBy('week'), periods: groupBy('period'),
+      series
+    };
+    c.achievements = achievements(c);
+    return c;
+  }
+
+  /* ---------- слова поддержки ---------- */
+  function dayFeedback(k, isToday, deltaOverGoal) {
+    const over = k > GOAL_KOP, equal = k === GOAL_KOP;
+    if (over) {
+      return {
+        level: 'over',
+        title: isToday ? 'Отлично! Сегодня ты превзошёл свою цель!' : 'Отлично! Этот день превзошёл цель!',
+        text: 'Сверх плана ' + fmtSigned(rub(k - GOAL_KOP)) + '. Этот запас закроет слабые дни.'
+      };
+    }
+    if (equal) return { level: 'done', title: 'План выполнен. Продолжай в том же духе!', text: 'Ровно по плану: ' + fmtRub(CFG.daily) + '.' };
+    if (k > 0) {
+      return {
+        level: 'partial',
+        title: 'Ещё один день приблизил тебя к результату!',
+        text: 'До плана дня не хватило ' + fmtRub(rub(GOAL_KOP - k)) + '. Их можно вернуть в другие дни.'
+      };
+    }
+    return { level: 'zero', title: 'Записано. Завтра новый день.', text: 'Нулевой день учтён в статистике.' };
+  }
+
+  const ACH_MESSAGES = {
+    first: 'Первый заработанный день — начало положено.',
+    s7: '7 дней подряд с выполненной целью.',
+    s14: '14 дней подряд. Это уже система.',
+    k20: 'Первый рубеж взят: 20 000 ₽.',
+    half: 'Ты уже на половине пути!',
+    finish: 'Финиш! Все 92 000 ₽ собраны.'
+  };
+
+  function heroLine(c) {
+    if (c.phase === 'before') return 'Старт ' + fmtDay(CFG.start) + '. Первый день задаёт темп.';
+    if (c.factKop >= TOTAL_KOP) return 'Цель достигнута. Отличный результат.';
+    if (c.phase === 'after') return 'Период завершён. Итог: ' + fmtRub(rub(c.factKop)) + ' из ' + fmtRub(CFG.daily * DAYS.length) + '.';
+    if (c.progressPct >= 50) return 'Ты уже на половине пути!';
+    if (c.filledCount === 0) return 'Каждый день приближает к результату';
+    if (c.reserveKop > 0) return 'Ты опережаешь график. Так держать.';
+    if (c.reserveKop < 0) return 'Один сильный день вернёт запас.';
+    return 'Идёшь точно по графику.';
+  }
+
+  return {
+    APP_ID, CFG, DAYS, GOAL_KOP, TOTAL_KOP, ACH, ACH_MESSAGES, AMOUNT_ERRORS,
+    parseDate, fmtDate, addDays, diffDays, weekdayIdx, dayOfMonth, monthIdx, yearOf, todayStr, isInPeriod,
+    pluralRu, daysWord, fmtNum, fmtRub, fmtSigned, fmtPct,
+    fmtLong, fmtDay, fmtDayShort, fmtWeekdayDay, fmtRange,
+    MONTHS_NOM, MONTHS_GEN, WEEKDAYS_SHORT, WEEKDAYS_FULL,
+    parseAmount, kop, rub, statusOf,
+    parseFuelAmount, parseLiters, fmtLiters, fmtPriceL, makeId,
+    emptyState, normalizeState, exportData, parseImport,
+    compute, dayFeedback, heroLine
+  };
+});
+
+</script>
+<script>
+/* МОЯ ЦЕЛЬ — интерфейс. Зависимости: Goal (logic.js) и Chart.js (графики). Иконки Lucide встроены. */
+(function () {
+  'use strict';
+  const G = window.Goal;
+  const $ = (s, r) => (r || document).querySelector(s);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+  const R = (k) => G.fmtRub(k / 100);
+  const RS = (k) => G.fmtSigned(k / 100);
+  const cls = (...a) => a.filter(Boolean).join(' ');
+  const reduceMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // в некоторых оболочках (например, во встроенных просмотрщиках) скачивание файлов заблокировано
+  const CAN_DL = !window.__MOYA_NO_DOWNLOAD__;
+  const fuelBtn = (date) => '<button class="btn fuel" data-action="open-fuel" data-date="' + date + '">' + icon('fuel') + 'Заправка</button>';
+  const exportRow = () => (CAN_DL
+    ? '<div class="btn-row"><button class="btn" data-action="export-file">' + icon('download') + 'Скачать .json</button><button class="btn" data-action="export-copy">' + icon('copy') + 'Скопировать</button></div>'
+    : '<button class="btn block" data-action="export-copy">' + icon('copy') + 'Скопировать копию</button>');
+
+  /* ---------- иконки Lucide ---------- */
+  const ICONS = {
+    home: '<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    calendarDays: '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="M8 14h.01"/><path d="M12 14h.01"/><path d="M16 14h.01"/><path d="M8 18h.01"/><path d="M12 18h.01"/><path d="M16 18h.01"/>',
+    calendarRange: '<rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4"/><path d="M3 10h18"/><path d="M8 2v4"/><path d="M17 14h-6"/><path d="M13 18H7"/><path d="M7 14h.01"/><path d="M17 18h.01"/>',
+    calendarCheck: '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="m9 16 2 2 4-4"/>',
+    chartColumn: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+    settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+    flame: '<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
+    trophy: '<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>',
+    check: '<path d="M20 6 9 17l-5-5"/>',
+    x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    chevronLeft: '<path d="m15 18-6-6 6-6"/>',
+    chevronRight: '<path d="m9 18 6-6-6-6"/>',
+    download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
+    upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>',
+    trash: '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
+    target: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+    trendingUp: '<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>',
+    lock: '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    pencil: '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
+    info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+    alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+    undo: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+    zap: '<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>',
+    flag: '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" x2="4" y1="22" y2="15"/>',
+    star: '<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>',
+    copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+    percent: '<line x1="19" x2="5" y1="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/>',
+    hourglass: '<path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/>',
+    gauge: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+    plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+    droplet: '<path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"/>',
+    fuel: '<line x1="3" x2="15" y1="22" y2="22"/><line x1="4" x2="14" y1="9" y2="9"/><path d="M14 22V4a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v18"/><path d="M14 13h2a2 2 0 0 1 2 2v2a2 2 0 0 0 2 2a2 2 0 0 0 2-2V9.83a2 2 0 0 0-.59-1.42L18 5"/>'
+  };
+  const icon = (n, size) => '<svg width="' + (size || 20) + '" height="' + (size || 20) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICONS[n] + '</svg>';
+
+  /* ---------- хранилище ---------- */
+  const KEY = 'moya-cel:v1';
+  const PREF_KEY = 'moya-cel:v1:prefs';
+  const UNDO_KEY = 'moya-cel:v1:undo';
+  const mem = {};
+  let storageOk = true;
+  let loadIssue = null;
+
+  function sget(k) {
+    try { return window.localStorage.getItem(k); } catch (e) { storageOk = false; return mem[k] === undefined ? null : mem[k]; }
+  }
+  function sset(k, v) {
+    mem[k] = v;
+    try { window.localStorage.setItem(k, v); return true; } catch (e) { storageOk = false; return false; }
+  }
+  function sdel(k) {
+    delete mem[k];
+    try { window.localStorage.removeItem(k); } catch (e) { /* хранилище недоступно */ }
+  }
+  (function probe() {
+    try { window.localStorage.setItem('moya-cel:probe', '1'); window.localStorage.removeItem('moya-cel:probe'); } catch (e) { storageOk = false; }
+  })();
+
+  function loadState() {
+    const raw = sget(KEY);
+    if (!raw) return G.emptyState();
+    try {
+      return G.normalizeState(JSON.parse(raw)).state;
+    } catch (e) {
+      sset(KEY + ':broken', raw);
+      loadIssue = 'broken';
+      return G.emptyState();
+    }
+  }
+  let state = loadState();
+
+  function persist() {
+    const ok = sset(KEY, JSON.stringify(state));
+    if (!ok && !persist.warned) {
+      persist.warned = true;
+      toast('Не удалось записать данные в память браузера. Сделайте резервную копию в настройках.', 'bad');
+    }
+    return ok;
+  }
+
+  let prefs = (function () {
+    const base = { theme: 'light', celebrate: true };
+    try {
+      const p = JSON.parse(sget(PREF_KEY) || '{}');
+      if (['dark', 'light', 'auto'].indexOf(p.theme) >= 0) base.theme = p.theme;
+      if (typeof p.celebrate === 'boolean') base.celebrate = p.celebrate;
+    } catch (e) { /* настройки по умолчанию */ }
+    return base;
+  })();
+  const savePrefs = () => sset(PREF_KEY, JSON.stringify(prefs));
+
+  function applyTheme() {
+    document.documentElement.setAttribute('data-app-theme', prefs.theme);
+    const m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#0c0f12');
+  }
+
+  /* ---------- состояние интерфейса ---------- */
+  const TABS = [
+    { id: 'home', label: 'Главная', icon: 'home' },
+    { id: 'calendar', label: 'Календарь', icon: 'calendarDays' },
+    { id: 'weeks', label: 'Недели', icon: 'calendarRange' },
+    { id: 'stats', label: 'Статистика', icon: 'chartColumn' },
+    { id: 'options', label: 'Настройки', icon: 'settings' }
+  ];
+  let today = G.todayStr();
+  let tab = 'home';
+  let weeksMode = 'weeks';
+  let sheetKind = null; // 'day' | 'import' | 'export' | 'reset'
+  let sheetPushed = false;
+  let sheetRev = 0;
+  let renderedSheetKey = '';
+  let lastTab = null;
+  let ds = null;   // окно дня
+  let imp = null;  // импорт
+  let exp = null;  // экспорт-текст
+  let rst = null;  // сброс
+  let fu = null;   // окно заправок
+  let charts = [];
+  let C = null;
+  const prevVals = {};
+  let lastFocus = null;
+
+  const els = {
+    view: $('#view'), nav: $('#nav'), overlay: $('#overlay'), cele: $('#cele'), toasts: $('#toasts')
+  };
+
+  /* ---------- служебное ---------- */
+  function toast(msg, kind) {
+    const t = document.createElement('div');
+    t.className = 'toast' + (kind === 'bad' ? ' bad' : '');
+    t.setAttribute('role', kind === 'bad' ? 'alert' : 'status');
+    t.innerHTML = icon(kind === 'bad' ? 'alert' : 'check', 18) + '<span>' + esc(msg) + '</span>';
+    els.toasts.appendChild(t);
+    setTimeout(() => { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 320); }, kind === 'bad' ? 6000 : 3200);
+  }
+  const buzz = (ms) => { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) { /* без вибрации */ } };
+  const col = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const daysAgo = (iso) => (Date.now() - Date.parse(iso)) / 86400000;
+
+  function statusLabel(d) {
+    if (d.status === 'done') return d.kop > G.GOAL_KOP ? 'Выше плана' : 'План выполнен';
+    if (d.status === 'partial') return 'Частично';
+    if (d.status === 'zero') return 'Нулевой день';
+    if (d.isFuture) return 'Ещё не наступил';
+    return d.isToday ? 'Ожидает записи' : 'Не заполнено';
+  }
+  const pill = (d) => '<span class="pill ' + d.status + '">' + esc(statusLabel(d)) + '</span>';
+  const notice = (kind, ico, body, action) =>
+    '<div class="notice ' + kind + '">' + icon(ico, 20) + '<div class="grow">' + body + (action ? '<div style="margin-top:6px">' + action + '</div>' : '') + '</div></div>';
+  const tile = (ico, k, v, s, extra) =>
+    '<div class="tile ' + (extra && extra.wide ? 'wide' : '') + '"><div class="k">' + icon(ico, 15) + esc(k) + '</div><div class="v num ' + ((extra && extra.cls) || '') + '">' + v + '</div><div class="s">' + s + '</div></div>';
+
+  /* ---------- экраны ---------- */
+  function header(title, sub, right) {
+    return '<header class="top"><div class="brand"><h1 style="font-size:23px;text-transform:none;letter-spacing:-0.01em">' + esc(title) + '</h1><p>' + esc(sub) + '</p></div>' + (right || '') + '</header>';
+  }
+
+  function viewHome(c) {
+    const cur = c.streak.current;
+    const top =
+      '<header class="top"><div class="brand"><h1>Моя цель</h1><p>Каждый день приближает к результату</p><div class="date-line">' + esc(G.fmtLong(today)) + '</div></div>' +
+      '<div class="streak ' + (cur > 0 ? 'hot' : '') + '" title="Серия дней подряд с выполненной целью">' + icon('flame', 17) +
+      (cur > 0 ? '<b>' + cur + '</b><span>' + G.pluralRu(cur, 'день', 'дня', 'дней') + ' подряд</span>' : '<span>Серия: 0</span>') + '</div></header>';
+
+    let notices = '';
+    if (loadIssue === 'broken') notices += notice('bad', 'alert', 'Сохранённые данные не удалось прочитать, поэтому приложение открылось пустым. Повреждённая запись осталась в браузере отдельно. Если есть резервная копия, восстановите её в настройках.');
+    if (!storageOk) notices += notice('bad', 'alert', 'Браузер не даёт сохранять данные на этом устройстве. Записи останутся только до закрытия страницы. Делайте резервную копию в настройках.');
+
+    const pct = Math.max(0, Math.min(100, c.progressPct));
+    const CIRC = 2 * Math.PI * 96;
+    let mark = '';
+    if (c.phase !== 'before' && c.planToDateKop > 0) {
+      const a = 2 * Math.PI * Math.min(1, c.planToDateKop / c.totalKop);
+      mark = '<circle class="ring-mark" cx="' + (110 + 96 * Math.cos(a)).toFixed(2) + '" cy="' + (110 + 96 * Math.sin(a)).toFixed(2) + '" r="6.5"/>';
+    }
+    const hero =
+      '<section class="card hero" aria-label="Прогресс к цели">' +
+      '<div class="ring-wrap"><svg class="ring" viewBox="0 0 220 220" role="img" aria-label="Выполнено ' + esc(G.fmtPct(c.progressPct)) + ' цели">' +
+      '<defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--accent-2)"/><stop offset="1" style="stop-color:var(--accent)"/></linearGradient></defs>' +
+      '<circle class="ring-bg" cx="110" cy="110" r="96"/>' +
+      '<circle class="ring-fg" cx="110" cy="110" r="96" stroke-dasharray="' + CIRC.toFixed(2) + '" style="stroke-dashoffset:' + CIRC.toFixed(2) + (pct <= 0 ? ';opacity:0' : '') + '" data-offset="' + (CIRC * (1 - pct / 100)).toFixed(2) + '"/>' +
+      mark + '</svg>' +
+      '<div class="ring-center"><span class="eyebrow">Заработано</span>' +
+      '<div class="big num" data-count="' + c.factKop / 100 + '" data-fmt="rub" data-key="fact">' + esc(R(c.factKop)) + '</div>' +
+      '<div class="of">из ' + esc(R(c.totalKop)) + '</div></div></div>' +
+      '<p class="hero-line">' + esc(G.heroLine(c)) + '</p>' +
+      (c.phase === 'active' && c.planToDateKop > 0
+        ? '<div class="legend-line"><span class="dot" style="background:var(--text);box-shadow:0 0 0 3px var(--surface-3)"></span>Где нужно быть по плану сегодня: ' + esc(R(c.planToDateKop)) + '</div>' : '') +
+      '<div class="triple"><div><div class="eyebrow">Цель</div><div class="v num">' + esc(R(c.totalKop)) + '</div></div>' +
+      '<div><div class="eyebrow">Прогресс</div><div class="v num" style="color:var(--accent)">' + esc(G.fmtPct(c.progressPct)) + '</div></div>' +
+      '<div><div class="eyebrow">Осталось</div><div class="v num">' + esc(R(c.remainingKop)) + '</div></div></div></section>';
+
+    const colA = hero + todayCard(c);
+
+    let colB = '';
+    if (c.missingCount > 0) {
+      const first = c.missing[0];
+      colB += notice('', 'info',
+        'Не заполнено: <b>' + G.daysWord(c.missingCount) + '</b>. Они серые: не считаются нулевыми и не влияют на средние, но их план уже учтён в запасе. Заполните их, чтобы цифры стали точными.',
+        '<button class="link-btn" data-action="open-day" data-date="' + first.date + '">Заполнить ' + esc(G.fmtDay(first.date)) + '</button>');
+    }
+    if (c.filledCount >= 5 && (!state.meta.lastExport || daysAgo(state.meta.lastExport) > 7)) {
+      colB += notice('info', 'download', 'Сделайте резервную копию. Данные хранятся только в этом браузере.',
+        '<button class="link-btn" data-action="goto" data-tab="options">Открыть настройки</button>');
+    }
+    colB += reserveCard(c);
+    colB += fuelCard(c);
+    colB += '<div class="tiles">' + homeTiles(c) + '</div>';
+    colB += achievementsCard(c);
+
+    return '<div class="view-in">' + notices + top + '<div class="cols two-wide"><div class="col">' + colA + '</div><div class="col">' + colB + '</div></div></div>';
+  }
+
+  function todayCard(c) {
+    const g = G.CFG.daily;
+    if (c.phase === 'before') {
+      const left = G.diffDays(today, G.CFG.start);
+      return '<section class="card today-card"><div class="eyebrow">Старт</div><div class="today-row"><div><div class="big num">' + esc(G.fmtDay(G.CFG.start)) +
+        '</div><p class="muted small">' + esc(G.WEEKDAYS_FULL[G.weekdayIdx(G.CFG.start)]) + ', через ' + esc(G.daysWord(left)) + '</p></div><span class="pill">Ждём старта</span></div>' +
+        '<p class="muted">План на каждый день: ' + esc(G.fmtRub(g)) + '. Первая запись откроется в день старта.</p>' +
+        '<button class="btn block" data-action="goto" data-tab="calendar">' + icon('calendarDays') + 'Открыть календарь</button></section>';
+    }
+    if (c.phase === 'after') {
+      return '<section class="card today-card"><div class="eyebrow">Период завершён</div><div class="today-row"><div><div class="big num">' + esc(R(c.factKop)) +
+        '</div><p class="muted small">из ' + esc(R(c.totalKop)) + ' · ' + esc(G.fmtPct(c.progressPct)) + '</p></div></div>' +
+        '<button class="btn block" data-action="goto" data-tab="stats">' + icon('chartColumn') + 'Посмотреть итоги</button></section>';
+    }
+    const td = c.todayDay;
+    if (td && td.filled) {
+      const delta = td.deltaKop;
+      return '<section class="card today-card"><div class="eyebrow">Сегодня записано</div><div class="today-row"><div><div class="big num">' + esc(R(td.kop)) +
+        '</div><p class="muted small">' + (delta === 0 ? 'Ровно по плану дня' : esc(RS(delta)) + ' к плану дня') + '</p></div>' + pill(td) + '</div>' +
+        (td.entry.note ? '<p class="muted small" style="overflow-wrap:anywhere">' + esc(td.entry.note) + '</p>' : '') +
+        '<div class="btn-row"><button class="btn" data-action="open-day" data-date="' + td.date + '">' + icon('pencil') + 'Изменить запись</button>' + fuelBtn(td.date) + '</div></section>';
+    }
+    const need = c.needTodayKop;
+    let line;
+    if (need <= 0) line = 'Запас уже закрывает сегодняшний план. Любая сумма добавит к запасу.';
+    else if (need === c.goalKop) line = 'Ровно по графику: заработать ' + esc(G.fmtRub(g)) + '.';
+    else if (need < c.goalKop) line = 'Чтобы остаться в графике, нужно <b>' + esc(R(need)) + '</b>. Остальное закрывает запас ' + esc(RS(c.reserveKop)) + '.';
+    else line = 'Чтобы догнать график, нужно <b>' + esc(R(need)) + '</b>: план дня и отставание ' + esc(R(-c.reserveKop)) + '.';
+    return '<section class="card today-card"><div class="eyebrow">План на сегодня</div><div class="today-row"><div><div class="big num">' + esc(G.fmtRub(g)) +
+      '</div></div>' + pill(td) + '</div><p class="muted">' + line + '</p>' +
+      '<div class="btn-row"><button class="btn primary" data-action="open-day" data-date="' + td.date + '">' + icon('plus') + 'Записать заработок</button>' + fuelBtn(td.date) + '</div></section>';
+  }
+
+  function reserveCard(c) {
+    if (c.phase === 'before' || (c.accountableCount === 0)) {
+      return '<section class="card"><div class="card-head"><h2>Запас относительно плана</h2>' + icon('trendingUp', 18) + '</div>' +
+        '<p class="muted">Запас появится, как только первый день войдёт в расчёт. Сильные дни будут покрывать слабые.</p></section>';
+    }
+    const res = c.reserveKop;
+    const top = Math.max(c.planToDateKop, c.factKop, 1);
+    const word = res > 0 ? 'Опережаешь график' : res < 0 ? 'Отстаёшь от графика' : 'Точно по графику';
+    return '<section class="card"><div class="card-head"><h2>Запас относительно плана</h2>' + icon(res < 0 ? 'alert' : 'trendingUp', 18) + '</div>' +
+      '<div class="reserve-val num ' + (res > 0 ? 'pos' : res < 0 ? 'neg' : '') + '" data-count="' + res / 100 + '" data-fmt="signed" data-key="reserve">' + esc(RS(res)) + '</div>' +
+      '<p class="muted small" style="margin-top:6px">' + word + ': заработано ' + esc(R(c.factKop)) + ' при плане ' + esc(R(c.planToDateKop)) + ' на ' + esc(G.daysWord(c.accountableCount)) + '.</p>' +
+      '<div class="bars"><div class="bar-row"><span>План</span><div class="track"><i class="plan" data-w="' + (c.planToDateKop / top * 100).toFixed(1) + '"></i></div><span class="v">' + esc(R(c.planToDateKop)) + '</span></div>' +
+      '<div class="bar-row"><span>Заработано</span><div class="track"><i class="' + (res < 0 ? 'amber' : '') + '" data-w="' + (c.factKop / top * 100).toFixed(1) + '"></i></div><span class="v">' + esc(R(c.factKop)) + '</span></div></div>' +
+      '<p class="dim small" style="margin-top:12px">Излишек сильного дня автоматически закрывает слабый.</p></section>';
+  }
+
+  function fuelCard(c) {
+    const head = '<div class="card-head"><h2>Заправка</h2><span class="fuel-ico">' + icon('fuel', 18) + '</span></div>';
+    const canAdd = c.phase !== 'before';
+    const addDate = c.phase === 'after' ? G.CFG.end : today;
+    const addBtn = canAdd ? '<div style="margin-top:14px"><button class="btn fuel block" data-action="open-fuel" data-date="' + addDate + '">' + icon('fuel') + 'Добавить заправку</button></div>' : '';
+    if (c.fuelCount === 0) {
+      return '<section class="card">' + head + '<p class="muted">' + (canAdd ? 'Заправок пока нет. Записывайте каждую: сумму, литры и цену литра посчитаются сами.' : 'Заправки можно записывать со дня старта.') + '</p>' + addBtn + '</section>';
+    }
+    const rows = c.fuelRecent.map((e) => '<button class="fuel-row" data-action="open-fuel" data-date="' + e.date + '"><span class="fr-d">' + esc(G.fmtDayShort(e.date)) + '</span><span class="fr-m">' +
+      (e.liters ? esc(G.fmtLiters(e.liters)) + ' · ' + esc(G.fmtPriceL(e.amount / e.liters)) : (e.note ? esc(e.note) : 'литры не указаны')) + '</span><b class="fr-a num">' + esc(G.fmtRub(e.amount)) + '</b></button>').join('');
+    return '<section class="card">' + head +
+      '<div class="fuel-big num">' + esc(R(c.fuelKop)) + '</div>' +
+      '<p class="muted small" style="margin-top:6px">' + c.fuelCount + ' ' + G.pluralRu(c.fuelCount, 'заправка', 'заправки', 'заправок') + ' за период, в среднем ' + esc(R(c.avgRefuelKop)) + '.</p>' +
+      '<div class="kv" style="margin-top:14px"><div><div class="eyebrow">Литров</div><div class="v">' + (c.fuelLiters ? esc(G.fmtLiters(c.fuelLiters)) : '—') + '</div></div>' +
+      '<div><div class="eyebrow">Цена литра</div><div class="v">' + (c.fuelPriceRub ? esc(G.fmtPriceL(c.fuelPriceRub)) : '—') + '</div></div>' +
+      '<div><div class="eyebrow">От заработка</div><div class="v">' + (c.fuelPct === null ? '—' : esc(G.fmtPct(c.fuelPct))) + '</div></div></div>' +
+      '<div class="fuel-net"><span>Остаётся после заправки</span><b class="num">' + esc(R(c.netKop)) + '</b></div>' +
+      '<div class="fuel-list">' + rows + '</div>' + addBtn +
+      '<p class="dim small" style="margin-top:12px">Заправка учитывается отдельно. План, запас и серия считаются по заработку без неё.</p></section>';
+  }
+
+  function homeTiles(c) {
+    const planPct = c.planPct === null ? '—' : G.fmtPct(c.planPct);
+    let forecast = '—', forecastSub = 'Появится после первой записи';
+    if (c.projectedKop !== null) {
+      forecast = R(c.projectedKop);
+      forecastSub = c.projectedDeltaKop >= 0 ? 'К финишу при текущем темпе, с запасом ' + R(c.projectedDeltaKop) : 'К финишу при текущем темпе, не хватит ' + R(-c.projectedDeltaKop);
+    }
+    return [
+      tile('percent', 'Выполнение плана', esc(planPct), c.planPct === null ? 'План ещё не начался' : 'от плана на сегодня', { cls: c.planPct !== null && c.planPct >= 100 ? 'pos' : '' }),
+      tile('calendarCheck', 'Дней выполнено', String(c.doneCount), 'цель достигнута · заполнено ' + c.filledCount + ' из ' + c.dayCount),
+      tile('hourglass', 'Дней осталось', String(c.remainingDays), c.phase === 'after' ? 'период завершён' : 'до ' + esc(G.fmtDay(G.CFG.end))),
+      tile('chartColumn', 'Средний за день', c.avgFilledKop === null ? '—' : esc(R(c.avgFilledKop)), c.avgFilledKop === null ? 'пока нет записей' : 'по ' + c.filledCount + ' заполненным дням'),
+      tile('gauge', 'Нужный темп', c.requiredPaceRub === null ? '—' : esc(G.fmtRub(c.requiredPaceRub)), c.requiredPaceRub === null ? 'дней не осталось' : 'в день, чтобы собрать ' + esc(R(c.totalKop))),
+      tile('trendingUp', 'Прогноз', esc(forecast), esc(forecastSub))
+    ].join('');
+  }
+
+  function achievementsCard(c) {
+    const n = c.achievements.filter((a) => a.unlocked).length;
+    const items = c.achievements.map((a) => {
+      const sub = a.unlocked ? 'Получено'
+        : a.unit === 'rub' ? 'Осталось ' + G.fmtRub(a.need - a.have)
+        : a.unit === 'days' ? a.have + ' из ' + a.need + ' дней'
+        : 'Ещё не получено';
+      return '<div class="ach ' + (a.unlocked ? 'on' : '') + '"><div class="ach-ico">' + icon(a.icon, 18) + '</div><div class="t">' + esc(a.title) + '</div>' +
+        '<div class="track"><i data-w="' + (a.ratio * 100).toFixed(1) + '"></i></div><div class="h">' + esc(sub) + '</div></div>';
+    }).join('');
+    return '<section class="card"><div class="card-head"><h2>Достижения</h2><span class="muted small">' + n + ' из ' + c.achievements.length + '</span></div><div class="ach-grid">' + items + '</div></section>';
+  }
+
+  /* календарь */
+  function viewCalendar(c) {
+    const groups = [];
+    c.days.forEach((d) => {
+      const key = G.yearOf(d.date) + '-' + G.monthIdx(d.date);
+      let g = groups[groups.length - 1];
+      if (!g || g.key !== key) { g = { key, month: G.monthIdx(d.date), year: G.yearOf(d.date), days: [] }; groups.push(g); }
+      g.days.push(d);
+    });
+    const months = groups.map((g) => {
+      let fact = 0, plan = 0;
+      g.days.forEach((d) => { plan += c.goalKop; if (d.filled) fact += d.kop; });
+      const lead = G.weekdayIdx(g.days[0].date);
+      let cells = G.WEEKDAYS_SHORT.map((w) => '<div class="wd">' + w + '</div>').join('');
+      for (let i = 0; i < lead; i++) cells += '<div class="cell blank" aria-hidden="true"></div>';
+      cells += g.days.map((d) => {
+        // копейки показываем «ценником» (2 500⁵⁰): так сумма не округляется и помещается в ячейку
+        const full = d.filled ? G.fmtNum(d.amount) : '—';
+        const comma = full.indexOf(',');
+        const whole = comma < 0 ? full : full.slice(0, comma);
+        const f = comma < 0 ? esc(full) : esc(whole) + '<sup>' + esc(full.slice(comma + 1)) + '</sup>';
+        const aria = G.fmtWeekdayDay(d.date) + ': ' + (d.filled ? 'заработано ' + G.fmtRub(d.amount) : statusLabel(d).toLowerCase()) + ', план ' + G.fmtRub(G.CFG.daily) + (d.fuelCount ? ', заправка ' + G.fmtRub(d.fuelKop / 100) : '');
+        return '<button class="' + cls('cell', d.status, d.isToday && 'today', d.isFuture && !d.isToday && 'future', d.isPast && 'past') + '" data-action="open-day" data-date="' + d.date + '" aria-label="' + esc(aria) + '">' +
+          '<span class="d">' + G.dayOfMonth(d.date) + '</span><span class="st"></span>' + (d.fuelCount ? '<span class="fu">' + icon('fuel', 10) + '</span>' : '') +
+          '<span class="f ' + (whole.length >= 6 ? 'long' : '') + '">' + f + '</span>' +
+          '<span class="p"><span class="pw">план </span>' + G.fmtNum(G.CFG.daily) + '<span class="pw"> ₽</span></span></button>';
+      }).join('');
+      return '<section class="card"><div class="month-head"><h2>' + G.MONTHS_NOM[g.month] + ' ' + g.year + '</h2><div class="sum">' + esc(R(fact)) + ' <span class="dim">из ' + esc(R(plan)) + '</span></div></div><div class="cal-grid">' + cells + '</div></section>';
+    }).join('');
+    const todayBtn = c.phase === 'active'
+      ? '<button class="btn sm primary" data-action="open-day" data-date="' + today + '">' + icon('plus', 16) + 'Сегодня</button>' : '';
+    const legend = '<div class="legend"><span><i class="dot" style="background:var(--accent)"></i>2 000 ₽ и больше</span><span><i class="dot" style="background:var(--amber)"></i>Меньше плана</span><span><i class="dot" style="background:var(--red)"></i>Нулевой день</span><span><i class="dot" style="background:var(--idle)"></i>Не заполнено</span><span class="lg-fuel">' + icon('fuel', 13) + 'Заправка</span></div>';
+    return '<div class="view-in">' + header('Календарь', G.fmtDay(G.CFG.start) + ' — ' + G.fmtDay(G.CFG.end) + ' · ' + c.dayCount + ' дня. Нажмите на день, чтобы записать заработок.', todayBtn) +
+      legend + '<div class="cols two">' + months + '</div></div>';
+  }
+
+  /* недели и периоды */
+  function groupCard(g, kind) {
+    const label = kind === 'week' ? 'Неделя ' + (g.index + 1) : 'Период ' + (g.index + 1);
+    const stateText = g.state === 'past' ? 'Завершён' : g.state === 'current' ? 'Идёт' : 'Впереди';
+    const pcls = g.state === 'past' ? (g.diffKop >= 0 ? 'done' : 'partial') : g.state === 'current' ? 'live' : 'empty';
+    const diff = g.accountableCount === 0 ? '—' : RS(g.diffKop);
+    const dcls = g.accountableCount === 0 ? '' : g.diffKop > 0 ? 'pos' : g.diffKop < 0 ? 'neg' : '';
+    const strip = '<div class="strip ' + (g.length > 7 ? 'p14' : '') + '">' + g.strip.map((s) => '<i class="' + s.status + (s.isToday ? ' today' : '') + '" title="' + esc(G.fmtDay(s.date)) + '"></i>').join('') + '</div>';
+    const third = kind === 'week'
+      ? '<div><div class="eyebrow">Выполнено</div><div class="v">' + g.doneCount + ' из ' + g.length + ' дн.</div></div>'
+      : '<div><div class="eyebrow">Средний день</div><div class="v">' + (g.avgKop === null ? '—' : esc(R(g.avgKop))) + '</div></div>';
+    const fuelLine = g.fuelKop > 0 ? '<p class="fuel-line">' + icon('fuel', 14) + '<span>Заправка ' + esc(R(g.fuelKop)) + ' · остаётся ' + esc(R(g.netKop)) + '</span></p>' : '';
+    const note = g.state === 'current' && g.accountableCount > 0
+      ? '<p class="dim small">Разница считается к плану на сегодня: ' + esc(R(g.planToDateKop)) + '.</p>'
+      : g.state === 'past' && g.filledCount < g.length ? '<p class="dim small">Не заполнено дней: ' + (g.length - g.filledCount) + '. Они пока без заработка.</p>' : '';
+    return '<article class="card wk"><div class="wk-top"><div><div class="t">' + label + '</div><div class="r">' + esc(G.fmtRange(g.start, g.end)) + ' · ' + esc(G.daysWord(g.length)) + '</div></div><span class="pill ' + pcls + '">' + stateText + '</span></div>' +
+      '<div class="wk-main"><div class="big num">' + esc(R(g.factKop)) + '</div><div class="of">из ' + esc(R(g.planKop)) + ' плана</div></div>' +
+      '<div class="track"><i class="' + (g.diffKop < 0 && g.state === 'past' ? 'amber' : '') + '" data-w="' + Math.min(100, g.pct).toFixed(1) + '"></i></div>' + strip +
+      '<div class="kv"><div><div class="eyebrow">Разница</div><div class="v ' + dcls + '">' + esc(diff) + '</div></div>' +
+      '<div><div class="eyebrow">Выполнение</div><div class="v">' + esc(G.fmtPct(g.pct)) + '</div></div>' + third + '</div>' + fuelLine + note + '</article>';
+  }
+
+  function viewWeeks(c) {
+    const isW = weeksMode === 'weeks';
+    const list = (isW ? c.weeks : c.periods).map((g) => groupCard(g, isW ? 'week' : 'period')).join('');
+    let summary = '';
+    if (!isW) {
+      const past = c.periods.filter((g) => g.state === 'past');
+      const ok = past.filter((g) => g.diffKop >= 0).length;
+      summary = '<p class="muted small" style="margin-top:12px">' + (past.length ? 'Завершено периодов: ' + past.length + ', выполнено по плану: ' + ok + '.' : 'Первый период закончится ' + esc(G.fmtDay(c.periods[0].end)) + '.') + '</p>';
+    }
+    return '<div class="view-in">' + header(isW ? 'Мои недели' : 'Периоды по 14 дней', isW ? 'Календарные недели с понедельника по воскресенье' : 'Контроль двухнедельных отрезков с ' + G.fmtDay(G.CFG.start), '') +
+      '<div class="seg" role="radiogroup" aria-label="Режим"><button role="radio" aria-checked="' + isW + '" data-action="weeks-mode" data-mode="weeks">Недели</button><button role="radio" aria-checked="' + !isW + '" data-action="weeks-mode" data-mode="periods">14 дней</button></div>' +
+      '<section class="card"><div class="card-head"><h2>План и факт</h2></div><div class="mini-legend"><span><i class="dot" style="background:var(--idle)"></i>План</span><span><i class="dot" style="background:var(--accent)"></i>Факт</span></div>' +
+      '<div class="chart-box"><canvas data-chart="' + (isW ? 'weeks' : 'periods') + '" role="img" aria-label="График плана и факта"></canvas></div>' + summary + '</section>' +
+      '<div class="cols two">' + list + '</div></div>';
+  }
+
+  /* статистика */
+  function viewStats(c) {
+    const b = c.best, w = c.worst;
+    const bd = (d) => d ? esc(R(d.kop)) : '—';
+    const bs = (d) => d ? esc(G.fmtWeekdayDay(d.date)) : 'Пока нет рабочих дней';
+    const tiles =
+      tile('trendingUp', 'Самый прибыльный день', bd(b), bs(b), { cls: b ? 'pos' : '' }) +
+      tile('alert', 'Самый слабый день', bd(w), bs(w)) +
+      tile('chartColumn', 'Средний за рабочий день', c.avgWorkingKop === null ? '—' : esc(R(c.avgWorkingKop)), c.workingCount ? 'рабочих дней: ' + c.workingCount : 'рабочий день — с заработком больше 0') +
+      tile('zap', 'Перевыполнение', esc(R(c.overKop)), 'сумма сверх плана за сильные дни', { cls: c.overKop > 0 ? 'pos' : '' }) +
+      tile('calendarCheck', 'Дней с целью', c.doneCount + ' из ' + c.filledCount, 'среди заполненных дней') +
+      tile('calendarDays', 'Нулевых дней', String(c.zeroCount), 'дни без заработка (выходные)');
+    const chartCard = (id, title, legend, note) =>
+      '<section class="card stat-chart"><div class="card-head"><h2>' + title + '</h2></div>' + (legend ? '<div class="mini-legend">' + legend + '</div>' : '') +
+      '<div class="chart-box"><canvas data-chart="' + id + '" role="img" aria-label="' + esc(title) + '"></canvas></div>' + (note ? '<p class="note">' + note + '</p>' : '') + '</section>';
+    let fnote = '';
+    if (c.projectedKop !== null) {
+      fnote = 'При текущем темпе к ' + esc(G.fmtDay(G.CFG.end)) + ' получится около ' + esc(R(c.projectedKop)) + (c.projectedDeltaKop >= 0 ? ': цель выполняется с запасом ' + esc(R(c.projectedDeltaKop)) + '.' : ': не хватит ' + esc(R(-c.projectedDeltaKop)) + ' до ' + esc(R(c.totalKop)) + '.');
+    }
+    const l = (color, text, dash) => '<span><i class="ln ' + (dash ? 'dash' : '') + '" style="color:' + color + '"></i>' + text + '</span>';
+    return '<div class="view-in">' + header('Статистика', 'Все цифры считаются из ваших записей') + '<div class="tiles">' + tiles + '</div>' +
+      '<div class="cols two">' +
+      chartCard('daily', 'Заработок по дням', '<span><i class="dot" style="background:var(--accent)"></i>План выполнен</span><span><i class="dot" style="background:var(--amber)"></i>Меньше плана</span><span><i class="dot" style="background:var(--red)"></i>Ноль</span>' + l('var(--text-3)', 'План ' + G.fmtRub(G.CFG.daily), true)) +
+      chartCard('delta', 'План и факт: отклонение', '<span><i class="dot" style="background:var(--accent)"></i>День к плану</span>' + l('var(--text)', 'Запас нарастающим итогом'), 'Столбцы показывают, насколько день выше или ниже плана. Линия — общий запас. Незаполненные прошедшие дни пока без заработка и сдвигают линию вниз.') +
+      chartCard('cumulative', 'Путь к ' + esc(R(c.totalKop)), l('var(--accent)', 'Факт') + l('var(--text-3)', 'План', true) + l('var(--accent-2)', 'Прогноз', true), fnote) +
+      chartCard('weeks2', 'Заработок по неделям', '<span><i class="dot" style="background:var(--idle)"></i>План</span><span><i class="dot" style="background:var(--accent)"></i>Факт</span>') +
+      '</div>' + fuelStats(c, chartCard) + '</div>';
+  }
+
+  function fuelStats(c, chartCard) {
+    const cnt = c.fuelCount + ' ' + G.pluralRu(c.fuelCount, 'заправка', 'заправки', 'заправок');
+    const tiles =
+      tile('fuel', 'Заправлено на сумму', esc(R(c.fuelKop)), c.fuelCount ? esc(cnt) + ', дней: ' + c.fuelDays : 'заправок пока нет') +
+      tile('droplet', 'Литров', c.fuelLiters ? esc(G.fmtLiters(c.fuelLiters)) : '—', c.fuelLiters ? 'всего за период' : 'литры не указаны') +
+      tile('percent', 'Цена литра', c.fuelPriceRub ? esc(G.fmtPriceL(c.fuelPriceRub)) : '—', 'в среднем по заправкам с литрами') +
+      tile('trendingUp', 'Остаётся после заправки', esc(R(c.netKop)), c.fuelPct === null ? 'заработок минус заправка' : 'заправка — ' + esc(G.fmtPct(c.fuelPct)) + ' заработка', { cls: c.netKop < 0 ? 'neg' : '' });
+    return '<div class="group-head"><h2 class="screen-title" style="font-size:19px">Заправка</h2><p class="screen-sub">Отдельный учёт: на план и запас не влияет</p></div>' +
+      '<div class="tiles four">' + tiles + '</div>' + chartCard('fuel', 'Заправка по дням', '', 'Столбцы показывают сумму всех заправок за день.');
+  }
+
+  /* настройки */
+  function viewOptions(c) {
+    const undo = readUndo();
+    const lastExp = state.meta.lastExport ? new Date(state.meta.lastExport) : null;
+    const dd = (d) => d.getDate() + ' ' + G.MONTHS_GEN[d.getMonth()] + ' ' + d.getFullYear();
+    const theme = (id, label) => '<button role="radio" aria-checked="' + (prefs.theme === id) + '" data-action="theme" data-theme-id="' + id + '">' + label + '</button>';
+    const rules = [
+      '«Заработано» — сумма всех записанных дней. Копейки сохраняются как есть, ничего не округляется.',
+      '«План на сегодня» в расчётах — это 2 000 ₽ за каждый прошедший день и за сегодняшний, когда он уже записан. Незаконченный день не считается отставанием.',
+      '«Запас» — заработано минус план на эту дату. Сильный день покрывает слабый: 3 000 ₽ и 1 000 ₽ дают те же 4 000 ₽, что и два дня по плану.',
+      'Незаполненный день серый. Он не считается нулевым, не попадает в средние и в «самый слабый день». Его план идёт в расчёт запаса, пока вы не запишете сумму.',
+      'Будущие дни не пропущены, и заполнить их заранее нельзя.',
+      'Красный день — запись «0 ₽» (не работал). «Рабочий день» — день с заработком больше нуля. «Средний за день» на главной считает все заполненные дни, а в статистике — только рабочие.',
+      'Серия — подряд идущие дни с заработком от 2 000 ₽. Сегодняшний день без записи серию не прерывает.',
+      'Заправка — отдельный учёт топлива: сумма, литры и цена литра. Она не вычитается из заработка и не влияет на план, запас, серию и достижения. «Остаётся после заправки» — это заработок минус заправка.'
+    ].map((t) => '<li>' + esc(t) + '</li>').join('');
+    return '<div class="view-in">' + header('Настройки', 'Внешний вид, резервная копия и правила плана') +
+      '<div class="cols two"><div class="col">' +
+      '<section class="card set-group"><h2>Внешний вид</h2><div class="seg" role="radiogroup" aria-label="Тема">' + theme('dark', 'Тёмная') + theme('light', 'Светлая') + theme('auto', 'Авто') + '</div>' +
+      '<div class="row"><div class="lbl"><b>Поздравления</b><span>Анимация и сообщения после записи дня</span></div><button class="switch" role="switch" aria-checked="' + prefs.celebrate + '" aria-label="Поздравления" data-action="toggle-celebrate"></button></div></section>' +
+      '<section class="card set-group"><h2>Правила плана</h2><div class="facts"><div><span>Период</span><span>' + esc(G.fmtDay(G.CFG.start)) + ' — ' + esc(G.fmtDay(G.CFG.end)) + '</span></div><div><span>Дней</span><span>' + c.dayCount + '</span></div><div><span>Цель на день</span><span>' + esc(G.fmtRub(G.CFG.daily)) + '</span></div><div><span>Цель на период</span><span>' + esc(R(c.totalKop)) + '</span></div></div>' +
+      '<hr class="divider"><details class="rules"><summary>Как считаются показатели' + icon('chevronRight', 18) + '</summary><ul>' + rules + '</ul></details></section>' +
+      '</div><div class="col">' +
+      '<section class="card set-group"><h2>Данные и резервная копия</h2>' +
+      '<div class="facts"><div><span>Записано дней</span><span>' + c.filledCount + ' из ' + c.dayCount + '</span></div><div><span>Заправок записано</span><span>' + c.fuelCount + '</span></div><div><span>Сумма записей</span><span>' + esc(R(c.factKop)) + '</span></div><div><span>Хранение</span><span>' + (storageOk ? 'в этом браузере' : 'недоступно') + '</span></div><div><span>Последняя копия</span><span>' + (lastExp ? esc(dd(lastExp)) : 'ещё не делали') + '</span></div></div>' +
+      '<p class="muted small">Данные лежат только на этом устройстве. Если очистить данные сайта или сменить телефон, записи пропадут, поэтому сохраняйте копию.</p>' +
+      exportRow() +
+      '<button class="btn block" data-action="open-import">' + icon('upload') + 'Загрузить копию</button>' +
+      (undo ? '<button class="btn ghost block" data-action="undo-restore">' + icon('undo') + 'Вернуть данные до ' + (undo.reason === 'reset' ? 'сброса' : 'импорта') + ' (' + esc(dd(new Date(undo.at))) + ')</button>' : '') +
+      '<hr class="divider"><button class="btn danger block" data-action="open-reset">' + icon('trash') + 'Сбросить все данные</button></section>' +
+      '<p class="dim small" style="text-align:center;padding:4px 0 0">МОЯ ЦЕЛЬ · версия 1.0</p>' +
+      '</div></div></div>';
+  }
+
+  /* ---------- графики ---------- */
+  function setupChartDefaults() {
+    const D = Chart.defaults;
+    D.font.family = getComputedStyle(document.body).fontFamily;
+    D.font.size = 11;
+    D.color = col('--text-3');
+    D.animation = reduceMotion() ? false : { duration: 650 };
+  }
+  const tip = (title, label) => ({
+    backgroundColor: col('--surface-3'), titleColor: col('--text'), bodyColor: col('--text-2'), borderColor: col('--line-2'), borderWidth: 1,
+    padding: 10, cornerRadius: 10, boxPadding: 4, titleFont: { weight: '700' }, callbacks: { title, label }
+  });
+  const scaleX = () => ({ grid: { display: false }, border: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8, color: col('--text-3') } });
+  const scaleY = (extra) => Object.assign({ border: { display: false }, grid: { color: col('--grid') }, ticks: { color: col('--text-3'), callback: (v) => G.fmtNum(v) } }, extra || {});
+  const baseOpts = () => ({ responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, layout: { padding: { top: 6, right: 4 } } });
+  const kr = (k) => (k === null ? null : k / 100);
+  const dayLabels = (c) => c.days.map((d) => String(G.dayOfMonth(d.date)).padStart(2, '0') + '.' + String(G.monthIdx(d.date) + 1).padStart(2, '0'));
+  const rubLabel = (ctx) => (ctx.parsed.y === null || ctx.parsed.y === undefined ? '' : ' ' + ctx.dataset.label + ': ' + G.fmtRub(ctx.parsed.y));
+
+  function groupChart(list, labels) {
+    return {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'План', data: list.map((g) => g.planKop / 100), backgroundColor: col('--idle'), borderRadius: 6, maxBarThickness: 26 },
+          { label: 'Факт', data: list.map((g) => g.factKop / 100), backgroundColor: col('--accent'), borderRadius: 6, maxBarThickness: 26 }
+        ]
+      },
+      options: Object.assign(baseOpts(), {
+        plugins: { legend: { display: false }, tooltip: tip((items) => { const l = items[0].label; return Array.isArray(l) ? l.join(' · ') : String(l).replace(/,/g, ' · '); }, rubLabel) },
+        scales: { x: Object.assign(scaleX(), { ticks: { maxRotation: 0, autoSkip: false, color: col('--text-3') } }), y: scaleY({ beginAtZero: true }) }
+      })
+    };
+  }
+
+  const CHARTS = {
+    weeks: (c) => groupChart(c.weeks, c.weeks.map((g) => ['Нед. ' + (g.index + 1), G.fmtRange(g.start, g.end)])),
+    weeks2: (c) => groupChart(c.weeks, c.weeks.map((g) => ['Нед. ' + (g.index + 1), G.fmtRange(g.start, g.end)])),
+    periods: (c) => groupChart(c.periods, c.periods.map((g) => ['Период ' + (g.index + 1), G.fmtRange(g.start, g.end)])),
+    daily: (c) => ({
+      type: 'bar',
+      data: {
+        labels: dayLabels(c),
+        datasets: [
+          { type: 'bar', label: 'Заработано', data: c.days.map((d) => kr(d.kop)), order: 2, borderRadius: 3, maxBarThickness: 14,
+            backgroundColor: c.days.map((d) => (d.status === 'done' ? col('--accent') : d.status === 'partial' ? col('--amber') : col('--red'))) },
+          { type: 'line', label: 'План', data: c.days.map(() => G.CFG.daily), order: 1, borderColor: col('--text-3'), borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 0, fill: false }
+        ]
+      },
+      options: Object.assign(baseOpts(), {
+        plugins: { legend: { display: false }, tooltip: tip((items) => G.fmtWeekdayDay(c.days[items[0].dataIndex].date), rubLabel) },
+        scales: { x: scaleX(), y: scaleY({ beginAtZero: true, suggestedMax: G.CFG.daily * 1.5 }) }
+      })
+    }),
+    delta: (c) => ({
+      type: 'bar',
+      data: {
+        labels: dayLabels(c),
+        datasets: [
+          { type: 'bar', label: 'День к плану', data: c.days.map((d) => kr(d.deltaKop)), order: 2, borderRadius: 3, maxBarThickness: 14,
+            backgroundColor: c.days.map((d) => (d.deltaKop !== null && d.deltaKop >= 0 ? col('--accent') : col('--red'))) },
+          { type: 'line', label: 'Запас', data: c.series.reserve.map(kr), order: 1, borderColor: col('--text'), borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.25, spanGaps: false }
+        ]
+      },
+      options: Object.assign(baseOpts(), {
+        plugins: { legend: { display: false }, tooltip: tip((items) => G.fmtWeekdayDay(c.days[items[0].dataIndex].date), (ctx) => (ctx.parsed.y === null ? '' : ' ' + ctx.dataset.label + ': ' + G.fmtSigned(ctx.parsed.y))) },
+        scales: { x: scaleX(), y: scaleY({ grid: { color: (ctx) => (ctx.tick && ctx.tick.value === 0 ? col('--line-2') : col('--grid')) } }) }
+      })
+    }),
+    fuel: (c) => ({
+      type: 'bar',
+      data: { labels: dayLabels(c), datasets: [{ label: 'Заправка', data: c.days.map((d) => (d.fuelKop ? d.fuelKop / 100 : null)), backgroundColor: col('--fuel'), borderRadius: 3, maxBarThickness: 14 }] },
+      options: Object.assign(baseOpts(), {
+        plugins: { legend: { display: false }, tooltip: tip((items) => G.fmtWeekdayDay(c.days[items[0].dataIndex].date), rubLabel) },
+        scales: { x: scaleX(), y: scaleY({ beginAtZero: true }) }
+      })
+    }),
+    cumulative: (c) => ({
+      type: 'line',
+      data: {
+        labels: dayLabels(c),
+        datasets: [
+          { label: 'Факт', data: c.series.cumFact.map(kr), borderColor: col('--accent'), backgroundColor: col('--accent-soft'), fill: 'origin', borderWidth: 2.5, pointRadius: 0, pointHoverRadius: 4, tension: 0.2, spanGaps: false, order: 1 },
+          { label: 'План', data: c.series.cumPlan.map(kr), borderColor: col('--text-3'), borderDash: [5, 4], borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 0, fill: false, order: 3 },
+          { label: 'Прогноз', data: c.series.forecast.map(kr), borderColor: col('--accent-2'), borderDash: [2, 4], borderWidth: 2, pointRadius: 0, pointHoverRadius: 0, fill: false, order: 2 }
+        ]
+      },
+      options: Object.assign(baseOpts(), {
+        plugins: { legend: { display: false }, tooltip: tip((items) => G.fmtWeekdayDay(c.days[items[0].dataIndex].date), rubLabel) },
+        scales: { x: scaleX(), y: scaleY({ beginAtZero: true, suggestedMax: c.totalKop / 100 }) }
+      })
+    })
+  };
+
+  // подгоняем размер суммы в ячейках календаря под реальную ширину (зависит от шрифта и экрана)
+  function fitCells() {
+    if (tab !== 'calendar') return;
+    els.view.querySelectorAll('.cell .f').forEach((el) => {
+      el.style.fontSize = '';
+      let size = parseFloat(getComputedStyle(el).fontSize) || 11;
+      let guard = 0;
+      while (el.scrollWidth > el.clientWidth + 0.5 && size > 6.5 && guard++ < 14) { size -= 0.5; el.style.fontSize = size + 'px'; }
+    });
+  }
+  let fitTimer = null;
+  window.addEventListener('resize', () => { clearTimeout(fitTimer); fitTimer = setTimeout(fitCells, 120); });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fitCells());
+
+  function destroyCharts() { charts.forEach((ch) => { try { ch.destroy(); } catch (e) { /* уже удалён */ } }); charts = []; }
+  function drawCharts(c) {
+    destroyCharts();
+    const boxes = els.view.querySelectorAll('canvas[data-chart]');
+    if (!boxes.length) return;
+    const msg = (cv, text) => cv.parentElement.insertAdjacentHTML('beforeend', '<div class="chart-empty">' + text + '</div>');
+    if (typeof Chart === 'undefined') { boxes.forEach((cv) => msg(cv, 'График не загрузился. Проверьте интернет и обновите страницу.')); return; }
+    setupChartDefaults();
+    boxes.forEach((cv) => {
+      const id = cv.dataset.chart;
+      if (((id === 'daily' || id === 'delta') && c.filledCount === 0) || (id === 'fuel' && c.fuelCount === 0)) {
+        msg(cv, id === 'fuel' ? 'График появится после первой заправки.' : 'График появится после первой записи.');
+        cv.style.visibility = 'hidden';
+        return;
+      }
+      try { charts.push(new Chart(cv, CHARTS[id](c))); } catch (e) { msg(cv, 'Не удалось построить график.'); if (window.console) console.error(e); }
+    });
+  }
+
+  /* ---------- окна ---------- */
+  function openDayState(date) {
+    const e = state.days[date];
+    ds = { date, value: e ? String(e.amount).replace('.', ',') : '', note: e ? e.note || '' : '', error: '', confirmClear: false };
+  }
+
+  function daySheetHtml(c) {
+    const d = c.days.find((x) => x.date === ds.date);
+    const locked = d.isFuture && !d.filled;
+    const i = d.idx;
+    const prev = i > 0 ? c.days[i - 1].date : null;
+    const next = i < c.days.length - 1 ? c.days[i + 1].date : null;
+    const head =
+      '<div class="grab"></div><div class="sheet-head"><div><h2 id="sheet-title">' + esc(G.fmtWeekdayDay(d.date)) + '</h2>' +
+      '<div class="sub">День ' + (i + 1) + ' из ' + c.dayCount + ' · план ' + esc(G.fmtRub(G.CFG.daily)) + '</div></div>' +
+      '<div class="head-actions"><button class="icon-btn" data-action="day-nav" data-date="' + (prev || '') + '" aria-label="Предыдущий день"' + (prev ? '' : ' disabled') + '>' + icon('chevronLeft') + '</button>' +
+      '<button class="icon-btn" data-action="day-nav" data-date="' + (next || '') + '" aria-label="Следующий день"' + (next ? '' : ' disabled') + '>' + icon('chevronRight') + '</button>' +
+      '<button class="icon-btn" data-action="close-sheet" aria-label="Закрыть">' + icon('x') + '</button></div></div>';
+    if (locked) {
+      return head + '<div class="locked">' + icon('lock', 30) + '<p>Этот день ещё не наступил.</p><p class="small dim" style="margin-top:6px">Запись откроется ' + esc(G.fmtDay(d.date)) + '. Будущие дни не считаются пропущенными.</p></div>' +
+        '<div class="btn-row"><button class="btn" data-action="close-sheet">Понятно</button></div>';
+    }
+    const chips = [['0', 'Не работал · 0'], ['1000', '1 000'], ['2000', '2 000 · план'], ['3000', '3 000']]
+      .map((ch) => '<button type="button" class="chip" data-action="chip" data-val="' + ch[0] + '">' + ch[1] + '</button>').join('');
+    return head +
+      '<form id="day-form" novalidate><label class="label" for="amt"><span>Фактический заработок</span></label>' +
+      '<div class="amount-box"><input id="amt" class="field' + (ds.error ? ' err' : '') + '" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="done" placeholder="0" value="' + esc(ds.value) + '" aria-describedby="amt-err amt-live"><span class="field-unit">₽</span></div>' +
+      '<div class="chips">' + chips + '</div>' +
+      '<div class="err-msg" id="amt-err" role="alert">' + esc(ds.error) + '</div><div class="live" id="amt-live" aria-live="polite"></div>' +
+      '<label class="label" for="note"><span>Комментарий</span><span id="note-count">' + ds.note.length + '/' + G.CFG.noteMax + '</span></label>' +
+      '<textarea id="note" class="txt-area" rows="3" maxlength="' + G.CFG.noteMax + '" placeholder="Смена, количество заказов, погода…">' + esc(ds.note) + '</textarea>' +
+      '<div class="btn-row"><button type="submit" class="btn primary">' + icon('check') + 'Сохранить</button>' +
+      (d.filled ? '<button type="button" class="btn danger" data-action="clear-day">' + icon('trash') + (ds.confirmClear ? 'Точно очистить?' : 'Очистить день') + '</button>' : '') + '</div>' +
+      '<button type="button" class="btn fuel block" style="margin-top:10px" data-action="to-fuel" data-date="' + d.date + '">' + icon('fuel') + 'Заправка за день' + (d.fuelCount ? ': ' + esc(R(d.fuelKop)) : '') + '</button>' +
+      (d.filled && d.entry.ts ? '<p class="dim small" style="margin-top:12px;text-align:center">Обновлено ' + esc(new Date(d.entry.ts).toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })) + '</p>' : '') +
+      '</form>';
+  }
+
+  function updateDayLive() {
+    const live = $('#amt-live');
+    if (!live || !ds) return;
+    const inp = $('#amt');
+    const err = $('#amt-err');
+    live.className = 'live';
+    if (ds.value.trim() === '') { live.textContent = ''; if (err) err.textContent = ds.error; if (inp) inp.classList.toggle('err', !!ds.error); document.querySelectorAll('.chip').forEach((c) => c.classList.remove('on')); return; }
+    const p = G.parseAmount(ds.value);
+    document.querySelectorAll('.chip').forEach((c) => c.classList.toggle('on', p.ok && G.kop(p.value) === G.kop(Number(c.dataset.val))));
+    if (!p.ok) { ds.error = G.AMOUNT_ERRORS[p.error]; if (err) err.textContent = ds.error; if (inp) inp.classList.add('err'); live.textContent = ''; return; }
+    ds.error = ''; if (err) err.textContent = ''; if (inp) inp.classList.remove('err');
+    const k = G.kop(p.value);
+    const delta = k - G.GOAL_KOP;
+    const test = JSON.parse(JSON.stringify(state));
+    test.days[ds.date] = { amount: p.value, note: '', ts: null };
+    const reserve = G.compute(test, today).reserveKop;
+    let a;
+    if (k === 0) { a = 'Не работал: день будет записан как нулевой.'; live.classList.add('neg'); }
+    else if (delta > 0) { a = esc(RS(delta)) + ' сверх плана дня.'; live.classList.add('pos'); }
+    else if (delta === 0) { a = 'Ровно по плану дня.'; live.classList.add('pos'); }
+    else { a = 'До плана дня не хватает ' + esc(R(-delta)) + '.'; live.classList.add('neg'); }
+    live.innerHTML = a + ' <span class="dim">Запас после записи: ' + esc(RS(reserve)) + '.</span>';
+  }
+
+  /* ---------- заправка ---------- */
+  function openFuelState(date) {
+    fu = { date, amount: '', liters: '', note: '', editId: null, error: '', confirmDel: null, noFocus: false };
+  }
+
+  function fuelSheetHtml(c) {
+    const d = c.days.find((x) => x.date === fu.date);
+    const i = d.idx;
+    const prev = i > 0 ? c.days[i - 1].date : null;
+    const next = i < c.days.length - 1 ? c.days[i + 1].date : null;
+    const list = state.fuel[fu.date] || [];
+    const head =
+      '<div class="grab"></div><div class="sheet-head"><div><h2 id="sheet-title">Заправка</h2><div class="sub">' + esc(G.fmtWeekdayDay(d.date)) + (list.length ? ' · за день ' + esc(R(d.fuelKop)) : '') + '</div></div>' +
+      '<div class="head-actions"><button class="icon-btn" data-action="fuel-nav" data-date="' + (prev || '') + '" aria-label="Предыдущий день"' + (prev ? '' : ' disabled') + '>' + icon('chevronLeft') + '</button>' +
+      '<button class="icon-btn" data-action="fuel-nav" data-date="' + (next || '') + '" aria-label="Следующий день"' + (next ? '' : ' disabled') + '>' + icon('chevronRight') + '</button>' +
+      '<button class="icon-btn" data-action="close-sheet" aria-label="Закрыть">' + icon('x') + '</button></div></div>';
+    if (d.isFuture) {
+      return head + '<div class="locked">' + icon('lock', 30) + '<p>Этот день ещё не наступил.</p><p class="small dim" style="margin-top:6px">Заправку можно записать в сам день или позже.</p></div>' +
+        '<div class="btn-row"><button class="btn" data-action="close-sheet">Понятно</button></div>';
+    }
+    const items = list.map((e) => {
+      const meta = [e.liters ? G.fmtLiters(e.liters) + ' · ' + G.fmtPriceL(e.amount / e.liters) : 'литры не указаны'];
+      if (e.note) meta.push(e.note);
+      return '<div class="fuel-item' + (fu.editId === e.id ? ' editing' : '') + '"><div class="fi-main"><div class="fi-a num">' + esc(G.fmtRub(e.amount)) + '</div><div class="fi-m">' + esc(meta.join(' · ')) + '</div></div>' +
+        '<button class="icon-btn" data-action="fuel-edit" data-id="' + esc(e.id) + '" aria-label="Изменить заправку">' + icon('pencil', 18) + '</button>' +
+        '<button class="icon-btn" data-action="fuel-del" data-id="' + esc(e.id) + '" aria-label="Удалить заправку">' + icon('trash', 18) + '</button></div>';
+    }).join('');
+    const chips = ['500', '1000', '1500', '2000'].map((v) => '<button type="button" class="chip" data-action="fuel-chip" data-val="' + v + '">' + G.fmtNum(Number(v)) + '</button>').join('');
+    const editing = !!fu.editId;
+    return head + (items ? '<div class="fuel-items">' + items + '</div>' : '') +
+      '<form id="fuel-form" novalidate><div class="label"><span>' + (editing ? 'Изменить заправку' : (items ? 'Ещё одна заправка' : 'Новая заправка')) + '</span></div>' +
+      '<div class="fuel-fields"><div><label class="label" for="f-amt"><span>Сумма, ₽</span></label><input id="f-amt" class="field sm" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="done" placeholder="0" value="' + esc(fu.amount) + '"></div>' +
+      '<div><label class="label" for="f-lit"><span>Литры</span></label><input id="f-lit" class="field sm" type="text" inputmode="decimal" autocomplete="off" enterkeyhint="done" placeholder="необязательно" value="' + esc(fu.liters) + '"></div></div>' +
+      '<div class="chips" style="margin-top:10px">' + chips + '</div>' +
+      '<div class="live" id="f-live" aria-live="polite"></div><div class="err-msg" id="f-err" role="alert">' + esc(fu.error) + '</div>' +
+      '<label class="label" for="f-note"><span>Комментарий</span></label><input id="f-note" class="txt-in" type="text" maxlength="' + G.CFG.fuelNoteMax + '" autocomplete="off" placeholder="АЗС, метан или пропан…" value="' + esc(fu.note) + '">' +
+      '<div class="btn-row"><button type="submit" class="btn primary">' + icon(editing ? 'check' : 'plus') + (editing ? 'Сохранить' : 'Добавить') + '</button>' +
+      (editing ? '<button type="button" class="btn" data-action="fuel-cancel">Отмена</button>' : '') + '</div>' +
+      '<button type="button" class="btn ghost block" style="margin-top:10px" data-action="to-day" data-date="' + d.date + '">' + icon('pencil') + 'Заработок за этот день</button></form>';
+  }
+
+  function updateFuelLive() {
+    if (!fu) return;
+    const live = $('#f-live'), err = $('#f-err');
+    if (!live || !err) return;
+    const a = fu.amount.trim() === '' ? null : G.parseFuelAmount(fu.amount);
+    const l = G.parseLiters(fu.liters);
+    document.querySelectorAll('[data-action="fuel-chip"]').forEach((ch) => ch.classList.toggle('on', !!a && a.ok && G.kop(a.value) === G.kop(Number(ch.dataset.val))));
+    let msg = '';
+    if (a && !a.ok) msg = G.AMOUNT_ERRORS[a.error];
+    else if (!l.ok) msg = G.AMOUNT_ERRORS[l.error];
+    err.textContent = msg || fu.error;
+    const ai = $('#f-amt'), li = $('#f-lit');
+    if (ai) ai.classList.toggle('err', (!!a && !a.ok) || (!!fu.error && !a));
+    if (li) li.classList.toggle('err', !l.ok);
+    live.textContent = a && a.ok && l.ok && l.value ? 'Цена литра: ' + G.fmtPriceL(a.value / l.value) : '';
+  }
+
+  function saveFuel() {
+    const fail = (msg, sel) => { fu.error = msg; updateFuelLive(); const f = $(sel); if (f) f.focus(); buzz(40); };
+    if (fu.amount.trim() === '') return fail('Введите сумму заправки', '#f-amt');
+    const a = G.parseFuelAmount(fu.amount);
+    if (!a.ok) return fail(G.AMOUNT_ERRORS[a.error], '#f-amt');
+    const l = G.parseLiters(fu.liters);
+    if (!l.ok) return fail(G.AMOUNT_ERRORS[l.error], '#f-lit');
+    const list = state.fuel[fu.date] || (state.fuel[fu.date] = []);
+    const note = fu.note.trim().slice(0, G.CFG.fuelNoteMax);
+    const now = new Date().toISOString();
+    const wasEdit = !!fu.editId;
+    if (wasEdit) {
+      const e = list.find((x) => x.id === fu.editId);
+      if (e) { e.amount = a.value; e.liters = l.value; e.note = note; e.ts = now; }
+    } else {
+      if (list.length >= G.CFG.fuelMax) { toast('За один день можно записать не больше ' + G.CFG.fuelMax + ' заправок', 'bad'); return; }
+      list.push({ id: G.makeId(), amount: a.value, liters: l.value, note, ts: now });
+    }
+    persist();
+    Object.assign(fu, { amount: '', liters: '', note: '', editId: null, error: '', confirmDel: null, noFocus: false });
+    sheetRev++;
+    buzz(18);
+    render();
+    toast(wasEdit ? 'Заправка изменена' : 'Заправка записана: ' + G.fmtRub(a.value));
+  }
+
+  function editFuel(id) {
+    const e = (state.fuel[fu.date] || []).find((x) => x.id === id);
+    if (!e) return;
+    Object.assign(fu, { editId: id, amount: String(e.amount).replace('.', ','), liters: e.liters ? String(e.liters).replace('.', ',') : '', note: e.note || '', error: '', noFocus: false });
+    sheetRev++; renderSheet();
+  }
+  function cancelFuelEdit() {
+    Object.assign(fu, { editId: null, amount: '', liters: '', note: '', error: '', noFocus: false });
+    sheetRev++; renderSheet();
+  }
+  function deleteFuel(id, btn) {
+    if (fu.confirmDel !== id) {
+      fu.confirmDel = id;
+      btn.classList.add('armed');
+      btn.textContent = 'Удалить?';
+      clearTimeout(deleteFuel.t);
+      deleteFuel.t = setTimeout(() => {
+        if (fu) fu.confirmDel = null;
+        if (document.contains(btn)) { btn.classList.remove('armed'); btn.innerHTML = icon('trash', 18); }
+      }, 3500);
+      return;
+    }
+    const list = state.fuel[fu.date] || [];
+    const idx = list.findIndex((x) => x.id === id);
+    if (idx >= 0) list.splice(idx, 1);
+    if (!list.length) delete state.fuel[fu.date];
+    if (fu.editId === id) Object.assign(fu, { editId: null, amount: '', liters: '', note: '' });
+    fu.confirmDel = null; fu.noFocus = true;
+    persist(); sheetRev++; render();
+    toast('Заправка удалена');
+  }
+
+  function importSheetHtml() {
+    let preview = '';
+    if (imp.result) {
+      if (!imp.result.ok) preview = '<div class="notice bad" style="margin:12px 0">' + icon('alert', 20) + '<div class="grow">' + esc(imp.result.error) + '</div></div>';
+      else {
+        const r = imp.result;
+        preview = '<div class="notice info" style="margin:12px 0">' + icon('info', 20) + '<div class="grow">В копии <b>' + G.daysWord(r.count) + '</b> на сумму <b>' + esc(G.fmtRub(r.total)) + '</b>' +
+          (r.skipped ? ' (пропущено записей: ' + r.skipped + ')' : '') + (r.hasFuel ? ', заправок: ' + r.fuelCount + ' на ' + esc(G.fmtRub(r.fuelTotal)) : '; заправок в файле нет, текущие сохранятся') + '. Сейчас в приложении ' + G.daysWord(C.filledCount) + ' на ' + esc(R(C.factKop)) + '. Текущие данные будут заменены, но их можно вернуть в настройках.</div></div>';
+      }
+    }
+    return '<div class="grab"></div><div class="sheet-head"><div><h2 id="sheet-title">Загрузить копию</h2><div class="sub">Файл .json, сохранённый этим приложением</div></div><button class="icon-btn" data-action="close-sheet" aria-label="Закрыть">' + icon('x') + '</button></div>' +
+      '<label class="btn block" for="imp-file" style="cursor:pointer">' + icon('upload') + 'Выбрать файл</label><input id="imp-file" class="sr" type="file" accept="application/json,.json,text/plain">' +
+      '<div class="label" style="margin-top:14px"><span>Или вставьте текст копии</span></div><textarea id="imp-text" class="txt-area mono" placeholder="{ &quot;app&quot;: &quot;moya-cel&quot;, … }">' + esc(imp.text) + '</textarea>' + preview +
+      '<div class="btn-row">' + (imp.result && imp.result.ok ? '<button class="btn primary" data-action="import-apply">' + icon('check') + 'Заменить данные</button>' : '<button class="btn primary" data-action="import-check"' + (imp.text.trim() ? '' : ' disabled') + '>Проверить копию</button>') + '</div>';
+  }
+
+  function exportSheetHtml() {
+    return '<div class="grab"></div><div class="sheet-head"><div><h2 id="sheet-title">Резервная копия</h2><div class="sub">Скопируйте текст и сохраните его в заметках или отправьте себе</div></div><button class="icon-btn" data-action="close-sheet" aria-label="Закрыть">' + icon('x') + '</button></div>' +
+      '<textarea id="exp-text" class="txt-area mono" readonly style="min-height:200px">' + esc(exp.text) + '</textarea>' +
+      '<div class="btn-row"><button class="btn primary" data-action="export-select">' + icon('copy') + 'Выделить всё</button></div>';
+  }
+
+  function resetSheetHtml() {
+    const ok = rst.word.trim().toUpperCase() === 'СБРОС';
+    return '<div class="grab"></div><div class="sheet-head"><div><h2 id="sheet-title">Сбросить все данные?</h2><div class="sub">Это действие удалит все записи и комментарии</div></div><button class="icon-btn" data-action="close-sheet" aria-label="Закрыть">' + icon('x') + '</button></div>' +
+      '<div class="notice bad">' + icon('alert', 20) + '<div class="grow">Будет удалено <b>' + G.daysWord(C.filledCount) + '</b> на сумму <b>' + esc(R(C.factKop)) + '</b>' + (C.fuelCount ? ' и <b>' + C.fuelCount + ' ' + G.pluralRu(C.fuelCount, 'заправка', 'заправки', 'заправок') + '</b> на <b>' + esc(R(C.fuelKop)) + '</b>' : '') + '. Сначала лучше сохранить резервную копию.</div></div>' +
+      '<div style="margin-top:12px">' + exportRow() + '</div>' +
+      '<label class="label" for="reset-word" style="margin-top:16px"><span>Для подтверждения введите слово СБРОС</span></label><input id="reset-word" class="confirm-input" type="text" autocomplete="off" autocapitalize="characters" value="' + esc(rst.word) + '">' +
+      '<div class="btn-row"><button class="btn danger solid" id="reset-go" data-action="reset-apply"' + (ok ? '' : ' disabled') + '>' + icon('trash') + 'Удалить все данные</button><button class="btn" data-action="close-sheet">Отмена</button></div>';
+  }
+
+  function renderSheet() {
+    const key = sheetKind ? sheetKind + (ds ? ds.date : '') + (fu ? fu.date : '') + sheetRev : '';
+    if (key === renderedSheetKey) return;
+    renderedSheetKey = key;
+    if (!sheetKind) {
+      els.overlay.innerHTML = '';
+      document.body.style.overflow = '';
+      if (lastFocus && document.contains(lastFocus)) { try { lastFocus.focus({ preventScroll: true }); } catch (e) { /* фокус недоступен */ } }
+      return;
+    }
+    let inner = '';
+    if (sheetKind === 'day' && ds) inner = daySheetHtml(C);
+    else if (sheetKind === 'fuel' && fu) inner = fuelSheetHtml(C);
+    else if (sheetKind === 'import' && imp) inner = importSheetHtml();
+    else if (sheetKind === 'export' && exp) inner = exportSheetHtml();
+    else if (sheetKind === 'reset' && rst) inner = resetSheetHtml();
+    els.overlay.innerHTML = '<div class="overlay" data-action="backdrop"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">' + inner + '</div></div>';
+    document.body.style.overflow = 'hidden';
+    if (sheetKind === 'day') {
+      updateDayLive();
+      const a = $('#amt');
+      if (a) { try { a.focus({ preventScroll: true }); a.setSelectionRange(a.value.length, a.value.length); } catch (e) { /* без фокуса */ } }
+    }
+    if (sheetKind === 'fuel' && fu) {
+      updateFuelLive();
+      const fa = $('#f-amt');
+      if (fa && !fu.noFocus) { try { fa.focus({ preventScroll: true }); } catch (e) { /* без фокуса */ } }
+    }
+  }
+
+  /* ---------- поздравления ---------- */
+  function burst() {
+    if (reduceMotion() || !prefs.celebrate) return;
+    const cv = document.createElement('canvas');
+    cv.id = 'fx';
+    document.body.appendChild(cv);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const W = (cv.width = Math.round(window.innerWidth * dpr));
+    const H = (cv.height = Math.round(window.innerHeight * dpr));
+    const x = cv.getContext('2d');
+    const colors = [col('--accent'), col('--accent-2'), col('--amber'), col('--text')];
+    const ps = [];
+    for (let i = 0; i < 46; i++) {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.1;
+      const s = (5 + Math.random() * 8) * dpr;
+      ps.push({ x: W / 2, y: H * 0.42, vx: Math.cos(a) * s, vy: Math.sin(a) * s, w: (3 + Math.random() * 4) * dpr, h: (5 + Math.random() * 6) * dpr, r: Math.random() * 6, vr: (Math.random() - 0.5) * 0.35, c: colors[i % colors.length], life: 0 });
+    }
+    let frame = 0;
+    (function tick() {
+      frame++;
+      x.clearRect(0, 0, W, H);
+      ps.forEach((p) => {
+        p.vy += 0.24 * dpr; p.vx *= 0.985; p.vy *= 0.985; p.x += p.vx; p.y += p.vy; p.r += p.vr;
+        const alpha = Math.max(0, 1 - frame / 105);
+        x.save(); x.globalAlpha = alpha; x.translate(p.x, p.y); x.rotate(p.r); x.fillStyle = p.c; x.fillRect(-p.w / 2, -p.h / 2, p.w, p.h); x.restore();
+      });
+      if (frame < 110) requestAnimationFrame(tick); else cv.remove();
+    })();
+  }
+
+  let celeTimer = null;
+  function celebrate(fb, badges, particles) {
+    clearTimeout(celeTimer);
+    const b = badges.map((a) => '<div class="cele-badge">' + icon(a.icon, 20) + '<span>' + esc(G.ACH_MESSAGES[a.id]) + '</span></div>').join('');
+    els.cele.innerHTML = '<div class="cele ' + fb.level + '" data-action="cele-close" role="dialog" aria-modal="true" aria-label="Поздравление"><div class="cele-card">' +
+      '<div class="cele-ring"><svg viewBox="0 0 76 76"><circle cx="38" cy="38" r="34"/><path d="M24 39l10 10 19-21"/></svg></div>' +
+      '<h2>' + esc(fb.title) + '</h2><p>' + esc(fb.text) + '</p>' + (b ? '<div class="cele-badges">' + b + '</div>' : '') +
+      '<button class="btn primary block" data-action="cele-close">Продолжить</button></div></div>';
+    if (particles) burst();
+    celeTimer = setTimeout(closeCele, 7000);
+  }
+  function closeCele() { clearTimeout(celeTimer); els.cele.innerHTML = ''; }
+
+  /* ---------- действия ---------- */
+  function openSheetHash(hash) {
+    lastFocus = document.activeElement;
+    sheetPushed = true;
+    location.hash = hash;
+  }
+  function closeSheet() {
+    if (!sheetKind) return;
+    sheetKind = null; ds = null; imp = null; exp = null; rst = null; fu = null;
+    if (sheetPushed) { sheetPushed = false; history.back(); } else { try { location.replace('#' + tab); } catch (e) { /* без изменения адреса */ } }
+    render();
+  }
+  function openDay(date) {
+    if (!G.isInPeriod(date)) return;
+    openDayState(date);
+    sheetKind = 'day';
+    sheetRev++;
+    openSheetHash('day-' + date);
+    render();
+  }
+
+  function openFuel(date) {
+    if (!G.isInPeriod(date)) return;
+    openFuelState(date);
+    sheetKind = 'fuel';
+    sheetRev++;
+    openSheetHash('fuel-' + date);
+    render();
+  }
+  // переключение между окном дня и окном заправок без новой записи в истории
+  function switchSheet(kind, date) {
+    if (!G.isInPeriod(date)) return;
+    if (kind === 'fuel') { ds = null; openFuelState(date); sheetKind = 'fuel'; }
+    else { fu = null; openDayState(date); sheetKind = 'day'; }
+    sheetRev++;
+    location.replace('#' + kind + '-' + date);
+    render();
+  }
+
+  function saveDay() {
+    const p = G.parseAmount(ds.value);
+    if (!p.ok) {
+      ds.error = G.AMOUNT_ERRORS[p.error];
+      updateDayLive();
+      const a = $('#amt'); if (a) a.focus();
+      buzz(40);
+      return;
+    }
+    const date = ds.date;
+    const old = state.days[date] || null;
+    const note = ds.note.trim().slice(0, G.CFG.noteMax);
+    const unchanged = old && G.kop(old.amount) === G.kop(p.value);
+    if (unchanged && (old.note || '') === note) { closeSheet(); toast('Без изменений'); return; }
+    state.days[date] = { amount: p.value, note, ts: new Date().toISOString() };
+    const after = G.compute(state, today);
+    const fresh = after.achievements.filter((a) => a.unlocked && !state.meta.celebrated[a.id]);
+    fresh.forEach((a) => { state.meta.celebrated[a.id] = true; });
+    persist();
+    C = after;
+    buzz(18);
+    closeSheet();
+    if (unchanged) { toast('Комментарий сохранён'); return; }
+    const fb = G.dayFeedback(G.kop(p.value), date === today);
+    if (prefs.celebrate && (fresh.length || fb.level === 'over' || fb.level === 'done')) {
+      celebrate(fb, fresh, fb.level === 'over' || fresh.length > 0);
+    } else if (fresh.length) {
+      toast(G.ACH_MESSAGES[fresh[0].id]);
+    } else {
+      toast(fb.title);
+    }
+  }
+
+  function clearDay() {
+    if (!ds.confirmClear) {
+      ds.confirmClear = true; sheetRev++; renderedSheetKey = ''; renderSheet();
+      clearTimeout(clearDay.t);
+      clearDay.t = setTimeout(() => { if (ds) { ds.confirmClear = false; sheetRev++; renderSheet(); } }, 4000);
+      return;
+    }
+    delete state.days[ds.date];
+    persist();
+    closeSheet();
+    toast('День очищен');
+  }
+
+  function snapshotUndo(reason) {
+    sset(UNDO_KEY, JSON.stringify({ reason, at: new Date().toISOString(), data: G.exportData(state) }));
+  }
+  function readUndo() {
+    try {
+      const u = JSON.parse(sget(UNDO_KEY) || 'null');
+      return u && u.data && u.at ? u : null;
+    } catch (e) { return null; }
+  }
+
+  function exportText() { return JSON.stringify(G.exportData(state), null, 2); }
+  function markExported() { state.meta.lastExport = new Date().toISOString(); persist(); }
+
+  function exportFile() {
+    const text = exportText();
+    try {
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'moya-cel-' + today + '.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
+      markExported();
+      toast('Копия отправлена в загрузки. Если файл не появился, нажмите «Скопировать».');
+    } catch (e) {
+      toast('Не удалось создать файл. Нажмите «Скопировать».', 'bad');
+    }
+    render();
+  }
+  function exportCopy() {
+    const text = exportText();
+    const fallback = () => {
+      exp = { text };
+      if (sheetKind) { sheetKind = 'export'; sheetRev++; render(); } else { sheetKind = 'export'; sheetRev++; openSheetHash('export-data'); render(); }
+    };
+    try {
+      navigator.clipboard.writeText(text).then(() => { markExported(); toast('Копия скопирована. Сохраните её в надёжном месте.'); render(); }, fallback);
+    } catch (e) { fallback(); }
+  }
+
+  function importCheck() {
+    imp.result = G.parseImport(imp.text);
+    sheetRev++; renderedSheetKey = ''; renderSheet();
+  }
+  function importApply() {
+    if (!imp || !imp.result || !imp.result.ok) return;
+    snapshotUndo('import');
+    const next = imp.result.state;
+    if (!imp.result.hasFuel) next.fuel = state.fuel; // копия из старой версии: заправки не стираем
+    const tmp = G.compute(next, today);
+    tmp.achievements.forEach((a) => { if (a.unlocked) next.meta.celebrated[a.id] = true; });
+    next.meta.lastExport = state.meta.lastExport;
+    state = next;
+    persist();
+    closeSheet();
+    toast('Данные восстановлены из копии');
+  }
+  function resetApply() {
+    if (!rst || rst.word.trim().toUpperCase() !== 'СБРОС') return;
+    snapshotUndo('reset');
+    state = G.emptyState();
+    persist();
+    closeSheet();
+    toast('Все данные сброшены');
+  }
+  function undoRestore() {
+    const u = readUndo();
+    if (!u) return;
+    const r = G.parseImport(JSON.stringify(u.data));
+    if (!r.ok) { toast('Не удалось вернуть данные', 'bad'); return; }
+    const tmp = G.compute(r.state, today);
+    tmp.achievements.forEach((a) => { if (a.unlocked) r.state.meta.celebrated[a.id] = true; });
+    r.state.meta.lastExport = state.meta.lastExport;
+    state = r.state;
+    persist();
+    sdel(UNDO_KEY);
+    render();
+    toast('Данные возвращены');
+  }
+
+  /* ---------- вывод ---------- */
+  function buildNav() {
+    els.nav.innerHTML = TABS.map((t) => '<button class="nav-btn" data-action="goto" data-tab="' + t.id + '" data-id="' + t.id + '"><span class="ico">' + icon(t.icon, 22) + '</span><span>' + t.label + '</span></button>').join('');
+  }
+  function updateNav() {
+    els.nav.querySelectorAll('.nav-btn').forEach((b) => {
+      if (b.dataset.id === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    });
+  }
+
+  function animateNumbers() {
+    els.view.querySelectorAll('[data-count]').forEach((el) => {
+      const to = parseFloat(el.dataset.count);
+      const key = el.dataset.key;
+      const fmt = el.dataset.fmt;
+      const f = (v) => (fmt === 'signed' ? G.fmtSigned(v) : G.fmtRub(v));
+      const from = key in prevVals ? prevVals[key] : 0;
+      prevVals[key] = to;
+      if (from === to || reduceMotion() || document.hidden) { el.textContent = f(to); return; }
+      const t0 = performance.now();
+      const dur = 750;
+      (function step(now) {
+        const k = Math.min(1, (now - t0) / dur);
+        const e = 1 - Math.pow(1 - k, 3);
+        el.textContent = f(k >= 1 ? to : from + (to - from) * e);
+        if (k < 1 && document.contains(el)) requestAnimationFrame(step);
+      })(t0);
+    });
+  }
+
+  function afterPaint() {
+    const apply = () => {
+      els.view.querySelectorAll('[data-offset]').forEach((el) => { el.style.strokeDashoffset = el.dataset.offset; });
+      els.view.querySelectorAll('.track > i[data-w]').forEach((el) => { el.style.width = el.dataset.w + '%'; });
+    };
+    if (document.hidden) apply(); else requestAnimationFrame(() => requestAnimationFrame(apply));
+  }
+
+  function render() {
+    try {
+      C = G.compute(state, today);
+      const changed = lastTab !== tab;
+      const y = window.scrollY;
+      const html = tab === 'calendar' ? viewCalendar(C) : tab === 'weeks' ? viewWeeks(C) : tab === 'stats' ? viewStats(C) : tab === 'options' ? viewOptions(C) : viewHome(C);
+      els.view.innerHTML = html;
+      const v = els.view.firstElementChild;
+      if (v) { v.className = 'view' + (changed ? '' : ' still'); }
+      updateNav();
+      afterPaint();
+      animateNumbers();
+      fitCells();
+      drawCharts(C);
+      if (changed) { window.scrollTo(0, 0); } else { window.scrollTo(0, y); }
+      lastTab = tab;
+      renderSheet();
+    } catch (e) {
+      if (window.console) console.error(e);
+      els.view.innerHTML = '<div class="card"><h2>Что-то пошло не так</h2><p class="muted" style="margin:8px 0 14px">Ваши записи не потеряны: они лежат в памяти браузера. Обновите страницу.</p><button class="btn primary" onclick="location.reload()">Обновить</button></div>';
+    }
+  }
+
+  /* ---------- маршрутизация по hash ---------- */
+  function onHash() {
+    const h = location.hash.replace(/^#/, '');
+    let m;
+    if ((m = /^day-(\d{4}-\d{2}-\d{2})$/.exec(h)) && G.isInPeriod(m[1])) {
+      if (!ds || ds.date !== m[1] || sheetKind !== 'day') { openDayState(m[1]); sheetRev++; }
+      sheetKind = 'day';
+    } else if ((m = /^fuel-(\d{4}-\d{2}-\d{2})$/.exec(h)) && G.isInPeriod(m[1])) {
+      if (!fu || fu.date !== m[1] || sheetKind !== 'fuel') { openFuelState(m[1]); sheetRev++; }
+      sheetKind = 'fuel';
+    } else if (h === 'import-data') {
+      if (!imp) imp = { text: '', result: null };
+      sheetKind = 'import';
+    } else if (h === 'export-data' && exp) {
+      sheetKind = 'export';
+    } else if (h === 'reset-data') {
+      if (!rst) rst = { word: '' };
+      sheetKind = 'reset';
+    } else {
+      sheetKind = null; sheetPushed = false; ds = null; imp = null; exp = null; rst = null; fu = null;
+      if (TABS.some((t) => t.id === h)) tab = h;
+    }
+    render();
+  }
+
+  /* ---------- события ---------- */
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-action]');
+    if (!el) return;
+    const a = el.dataset.action;
+    if (a === 'backdrop') { if (e.target === el) closeSheet(); return; }
+    if (a === 'cele-close') { if (el.classList.contains('cele') && e.target !== el) return; closeCele(); return; }
+    switch (a) {
+      case 'goto': {
+        const t = el.dataset.tab;
+        if (t === tab && !sheetKind) { window.scrollTo({ top: 0, behavior: reduceMotion() ? 'auto' : 'smooth' }); break; }
+        tab = t;
+        if (location.hash.replace('#', '') === t) render(); else location.hash = t;
+        break;
+      }
+      case 'open-day': openDay(el.dataset.date); break;
+      case 'day-nav': if (el.dataset.date) { openDayState(el.dataset.date); sheetRev++; location.replace('#day-' + el.dataset.date); render(); } break;
+      case 'close-sheet': closeSheet(); break;
+      case 'chip': {
+        if (!ds) break;
+        ds.value = el.dataset.val; ds.error = '';
+        const inp = $('#amt'); if (inp) inp.value = ds.value;
+        updateDayLive();
+        break;
+      }
+      case 'clear-day': clearDay(); break;
+      case 'open-fuel': openFuel(el.dataset.date); break;
+      case 'to-fuel': switchSheet('fuel', el.dataset.date); break;
+      case 'to-day': switchSheet('day', el.dataset.date); break;
+      case 'fuel-nav': if (el.dataset.date) switchSheet('fuel', el.dataset.date); break;
+      case 'fuel-chip': { if (!fu) break; fu.amount = el.dataset.val; fu.error = ''; const fi = $('#f-amt'); if (fi) fi.value = fu.amount; updateFuelLive(); break; }
+      case 'fuel-edit': editFuel(el.dataset.id); break;
+      case 'fuel-del': deleteFuel(el.dataset.id, el); break;
+      case 'fuel-cancel': cancelFuelEdit(); break;
+      case 'weeks-mode': weeksMode = el.dataset.mode; render(); break;
+      case 'theme': prefs.theme = el.dataset.themeId; savePrefs(); applyTheme(); render(); break;
+      case 'toggle-celebrate': prefs.celebrate = !prefs.celebrate; savePrefs(); render(); break;
+      case 'export-file': exportFile(); break;
+      case 'export-copy': exportCopy(); break;
+      case 'export-select': { const t = $('#exp-text'); if (t) { t.focus(); t.select(); } break; }
+      case 'open-import': imp = { text: '', result: null }; sheetKind = 'import'; sheetRev++; openSheetHash('import-data'); render(); break;
+      case 'import-check': importCheck(); break;
+      case 'import-apply': importApply(); break;
+      case 'open-reset': rst = { word: '' }; sheetKind = 'reset'; sheetRev++; openSheetHash('reset-data'); render(); break;
+      case 'reset-apply': resetApply(); break;
+      case 'undo-restore': undoRestore(); break;
+      default: break;
+    }
+  });
+
+  document.addEventListener('submit', (e) => {
+    if (e.target && e.target.id === 'day-form') { e.preventDefault(); saveDay(); }
+    else if (e.target && e.target.id === 'fuel-form') { e.preventDefault(); if (fu) saveFuel(); }
+  });
+
+  document.addEventListener('input', (e) => {
+    const t = e.target;
+    if (t.id === 'amt' && ds) { ds.value = t.value; ds.error = ''; updateDayLive(); }
+    else if (t.id === 'note' && ds) { ds.note = t.value; const n = $('#note-count'); if (n) n.textContent = t.value.length + '/' + G.CFG.noteMax; }
+    else if ((t.id === 'f-amt' || t.id === 'f-lit' || t.id === 'f-note') && fu) {
+      if (t.id === 'f-amt') fu.amount = t.value; else if (t.id === 'f-lit') fu.liters = t.value; else fu.note = t.value;
+      fu.error = ''; updateFuelLive();
+    }
+    else if (t.id === 'imp-text' && imp) {
+      imp.text = t.value; imp.result = null;
+      const go = $('[data-action="import-check"], [data-action="import-apply"]');
+      if (go) { go.setAttribute('data-action', 'import-check'); go.textContent = 'Проверить копию'; go.disabled = !imp.text.trim(); }
+      const note = els.overlay.querySelector('.notice'); if (note) note.remove();
+    } else if (t.id === 'reset-word' && rst) {
+      rst.word = t.value;
+      const go = $('#reset-go'); if (go) go.disabled = rst.word.trim().toUpperCase() !== 'СБРОС';
+    }
+  });
+
+  document.addEventListener('change', (e) => {
+    if (e.target.id === 'imp-file' && imp && e.target.files && e.target.files[0]) {
+      const f = e.target.files[0];
+      if (f.size > 2 * 1024 * 1024) { imp.result = { ok: false, error: 'Файл слишком большой для резервной копии.' }; sheetRev++; renderedSheetKey = ''; renderSheet(); return; }
+      const rd = new FileReader();
+      rd.onload = () => { imp.text = String(rd.result || ''); importCheck(); };
+      rd.onerror = () => { imp.result = { ok: false, error: 'Не удалось прочитать файл.' }; sheetRev++; renderedSheetKey = ''; renderSheet(); };
+      rd.readAsText(f);
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { if (els.cele.firstChild) closeCele(); else if (sheetKind) closeSheet(); }
+  });
+
+  window.addEventListener('hashchange', onHash);
+  window.addEventListener('storage', (e) => { if (e.key === KEY) { state = loadState(); render(); } });
+  window.addEventListener('error', () => { /* ошибки рисования не должны ронять данные */ });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkDay(); });
+  if (window.matchMedia) {
+    const mq = window.matchMedia('(prefers-color-scheme: light)');
+    if (mq.addEventListener) mq.addEventListener('change', () => { applyTheme(); render(); });
+  }
+
+  function checkDay() {
+    const t = G.todayStr();
+    if (t !== today) { today = t; render(); }
+  }
+  setInterval(checkDay, 20000);
+
+  /* ---------- запуск ---------- */
+  function init() {
+    applyTheme();
+    buildNav();
+    const h = location.hash.replace(/^#/, '');
+    if (TABS.some((t) => t.id === h)) tab = h;
+    onHash();
+    if (navigator.storage && navigator.storage.persist) { try { navigator.storage.persist(); } catch (e) { /* не критично */ } }
+  }
+  init();
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}), { once: true });
+  }
+})();
+
+</script>
+</body>
+</html>
